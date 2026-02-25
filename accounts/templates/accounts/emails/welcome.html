@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Welcome to {{ school.name }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; }
+        .content { padding: 30px; background-color: #f9f9f9; }
+        .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
+        .credentials { background-color: #fff; border: 1px solid #ddd; padding: 15px; margin: 15px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Welcome to {{ school.name }}</h1>
+        </div>
+        
+        <div class="content">
+            <p>Dear {{ user.get_full_name }},</p>
+            
+            <p>Your account has been successfully created on the School Management System.</p>
+            
+            <div class="credentials">
+                <p><strong>Login ID:</strong> {{ user.login_id }}</p>
+                {% if temp_password %}
+                <p><strong>Temporary Password:</strong> {{ temp_password }}</p>
+                <p><em>Please change your password after first login.</em></p>
+                {% endif %}
+            </div>
+            
+            <p>You can access the system using this link:</p>
+            <p><a href="{{ login_url }}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Access School Portal</a></p>
+            
+            <p>Your role in the system is: <strong>{{ user.get_user_type_display }}</strong></p>
+            
+            <p>If you have any questions or need assistance, please contact the school administration.</p>
+        </div>
+        
+        <div class="footer">
+            <p>© {% now "Y" %} {{ school.name }}. All rights reserved.</p>
+            <p>This is an automated message, please do not reply to this email.</p>
+        </div>
+    </div>
+</body>
+</html>

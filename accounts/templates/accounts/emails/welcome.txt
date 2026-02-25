@@ -1,0 +1,19 @@
+Welcome to {{ school.name }}
+
+Dear {{ user.get_full_name }},
+
+Your account has been successfully created on the School Management System.
+
+Login Details:
+- Login ID: {{ user.login_id }}
+{% if temp_password %}- Temporary Password: {{ temp_password }}
+  Please change your password after first login.
+{% endif %}
+
+Access the system here: {{ login_url }}
+
+Your role: {{ user.get_user_type_display }}
+
+If you have any questions, contact the school administration.
+
+© {% now "Y" %} {{ school.name }}
