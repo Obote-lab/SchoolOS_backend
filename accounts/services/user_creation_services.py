@@ -1,191 +1,200 @@
+"""
+User Creation Service
+
+This is the ONLY recommended entry point for creating users in SchoolOS.
+Never create users directly from views or serializers.
+"""
+
+from __future__ import annotations
 import logging
-from typing import Dict, List, Optional
+from typing import Any
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
-from django.utils.crypto import get_random_string
-from django.utils import timezone
-from django.db.models import Q
-from ..models import AuditLog, CustomUser, Role, UserRole, PermissionMatrix
-from ..utils import send_welcome_email
+from requests import request
+from core.choices import AccessLevelChoices
+from core.choices.identity import AuditActionChoices
+from ..models import AuditLog, CustomUser, Role, UserRole
+from .email_service import EmailService
 from .login_id_generator import LoginIDGenerator
+from core.audit import create_audit_log
+
+
+
 
 logger = logging.getLogger(__name__)
 
 
 class UserCreationService:
     """
-    Secure, audited user creation with hierarchy enforcement.
-    Uses PermissionMatrix for authorization.
-    No plaintext temp passwords returned.
+    Responsible for the complete lifecycle of creating users.
     """
 
-    @staticmethod
-    def can_create(creator: CustomUser, target_role: Role, target_school=None) -> bool:
-        """
-        Check if creator can assign the target role (via PermissionMatrix)
-        """
-        actor_roles_qs = creator.user_roles.filter(is_active=True)
-        if target_school:
-            actor_roles_qs = actor_roles_qs.filter(
-                Q(school=target_school) | Q(role__access_level__in=["county", "national"])
-            )
-        else:
-            actor_roles_qs = actor_roles_qs.filter(role__access_level__in=["county", "national"])
+    MAX_LOGIN_ID_ATTEMPTS = 10
 
-        if not actor_roles_qs.exists():
-            return False
-
-        return PermissionMatrix.objects.filter(
-            role__in=actor_roles_qs.values_list("role_id", flat=True),
-            module="users",
-            action="create",
-            is_allowed=True,
-            resource_scope__in=["school", "county", "national"] if target_school else ["county", "national"]
-        ).exists()
-
-    @staticmethod
+    # PUBLIC API
+    @classmethod
     @transaction.atomic
     def create_user(
+        cls,
         *,
         creator: CustomUser,
-        school: Optional["schools.School"],
-        user_data: Dict,
+        user_data: dict[str, Any],
         role_name: str,
+        school=None,
         send_email: bool = True,
     ) -> CustomUser:
         """
-        Create user + assign role + audit + send welcome (no temp password returned)
+        Create a user with full consistency guarantees.
+
+        Steps:
+        1. Resolve role
+        2. Validate permissions
+        3. Generate unique login ID
+        4. Create user record
+        5. Assign primary role
+        6. Apply role-based defaults
+        7. Create audit log
+        8. Send welcome email (optional)
         """
-        # Resolve role
+        role = cls._get_role(role_name)
+        cls._validate_permissions(creator, role, school)
+
+        login_id = cls._generate_unique_login_id(school=school)
+
+        user = cls._create_user_record(
+            login_id=login_id,
+            school=school,
+            user_data=user_data,
+        )
+
+        cls._assign_primary_role(creator, user, role, school)
+        cls._apply_defaults(user, role)
+        cls._create_audit_log(creator, user, role, school)
+
+        if send_email:
+            try:
+                EmailService.send_welcome_email(user)
+            except Exception:
+                logger.exception("Failed to send welcome email to %s", user.login_id)
+
+        logger.info("User %s created by %s with role %s", user.login_id, creator.login_id, role.name)
+        return user
+
+    # PRIVATE HELPERS
+    @staticmethod
+    def _get_role(role_name: str) -> Role:
         try:
-            role = Role.objects.get(name=role_name)
+            return Role.objects.get(name=role_name)
         except Role.DoesNotExist:
-            raise ValueError(f"Role not found: {role_name}")
+            raise ValidationError(f"Role '{role_name}' does not exist.")
 
-        # Permission check
-        if not UserCreationService.can_create(creator, role, school):
-            raise PermissionDenied(f"Cannot create user with role '{role_name}'")
+    @staticmethod
+    def _validate_permissions(creator: CustomUser, role: Role, school) -> None:
+        if not creator.can_manage_role(role, school):
+            raise PermissionDenied(f"You do not have permission to assign the role '{role.name}'.")
 
-        # School validation
-        if role.access_level == Role.AccessLevelChoices.SCHOOL and not school:
-            raise ValueError(f"School required for role: {role_name}")
-        if role.access_level in ["county", "national"] and school:
-            raise ValueError(f"Role {role_name} cannot be school-specific")
+        if role.access_level == AccessLevelChoices.SCHOOL and school is None:
+            raise ValidationError(f"Role '{role.name}' requires a school.")
 
-        # Generate short login_id
-        user_type_code = "USR"  # fallback
-        for k, v in {
-            "SYS": "System Root", "RAD": "Regional Admin", "PRN": "Principal",
-            "DEP": "Deputy", "HOD": "Head of Department", "ADM": "Administrator",
-            "TCH": "Teacher", "STU": "Student", "PAR": "Parent",
-            "MTN": "Matron", "SEC": "Security", "DRV": "Driver", "COK": "Cook"
-        }.items():
-            if v == role_name:
-                user_type_code = k
-                break
+        if role.access_level in (AccessLevelChoices.COUNTY, AccessLevelChoices.NATIONAL) and school is not None:
+            raise ValidationError(f"Role '{role.name}' cannot be assigned to a specific school.")
 
-        max_attempts = 10
-        login_id = None
-        for _ in range(max_attempts):
-            candidate = LoginIDGenerator.generate_login_id(school=school, user_type=user_type_code)
+    @classmethod
+    def _generate_unique_login_id(cls, school) -> str:
+        for _ in range(cls.MAX_LOGIN_ID_ATTEMPTS):
+            candidate = LoginIDGenerator.generate_login_id(school=school)
             if not CustomUser.objects.filter(login_id=candidate).exists():
-                login_id = candidate
-                break
-        if not login_id:
-            raise RuntimeError("Failed to generate unique login ID")
+                return candidate
+        raise RuntimeError("Unable to generate a unique login ID after multiple attempts.")
 
-        # Prepare user
-        password = user_data.pop("password", None)
-        auto_password = password is None
-        plain_password = password or get_random_string(12)
+    @staticmethod
+    def _create_user_record(*, login_id: str, school, user_data: dict[str, Any]) -> CustomUser:
+        return CustomUser.objects.create_user(
+            login_id=login_id,
+            school=school,
+            **user_data,
+        )
 
-        try:
-            user = CustomUser.objects.create_user(
-                login_id=login_id,
-                school=school,
-                user_type=user_type_code,
-                password=plain_password,
-                **user_data
-            )
-        except ValidationError as exc:
-            raise ValueError(f"Validation failed: {exc.message_dict}")
-
-        # Assign role
+    @staticmethod
+    def _assign_primary_role(creator, user, role, school):
         UserRole.objects.create(
             user=user,
             role=role,
-            school=school if role.access_level == Role.AccessLevelChoices.SCHOOL else None,
+            school=school if role.access_level == AccessLevelChoices.SCHOOL else None,
+            assigned_by=creator,
             is_primary_role=True,
-            assigned_by=creator
         )
 
-        # Student defaults
-        if user_type_code == "STU":
+    @staticmethod
+    def _apply_defaults(user: CustomUser, role: Role):
+        """
+        Apply sensible defaults based on the role.
+        Currently only special handling for Students.
+        """
+        # Students should not log in by default
+        if role.name.lower() in ("student", "learner"):
             user.can_login = False
-            if school and "swahili" in school.county.lower():
-                user.preferred_language = "sw"
-            user.save(update_fields=["can_login", "preferred_language"])
-
-        # Force password change if auto-generated
-        if auto_password:
             prefs = user.notification_prefs or {}
             prefs["must_change_password"] = True
             user.notification_prefs = prefs
-            user.save(update_fields=["notification_prefs"])
-
-        # Audit
-        AuditLog.objects.create(
-            user=creator,
-            action_type="CREATE",
-            model_name="CustomUser",
-            record_id=user.id,
-            new_value=f"Created {role_name} user: {user.login_id} ({user.get_full_name()})",
-            reason=f"User creation by {creator.get_full_name()}",
-            school=school,
-            timestamp=timezone.now()
-        )
-
-        # Welcome email (no temp password)
-        if send_email and (user.email or user.recovery_email):
-            try:
-                send_welcome_email(user)
-            except Exception as exc:
-                logger.warning(f"Welcome email failed for {user.login_id}: {exc}")
-
-        return user
+            user.save(update_fields=["can_login", "notification_prefs"])
 
     @staticmethod
-    @transaction.atomic
-    def create_bulk_users(
-        creator: CustomUser,
-        school: Optional["schools.School"],
-        users_data: List[Dict],
-        role_name: str,
-        send_email: bool = False,
-    ) -> Dict:
-        results = {"created": [], "failed": []}
+    def _create_audit_log(creator, user, role, school):
+        highest_role = creator.get_highest_tier()
+        role_name = highest_role.name if highest_role else ""
 
-        for idx, data in enumerate(users_data):
+        create_audit_log(
+            actor=creator,
+            action=AuditActionChoices.CREATE,
+            model_name="CustomUser",
+            record_id=user.id,
+            school=school,
+            reason=f"Created user with role '{role.name}'",
+            new_value=user.login_id,
+            request=request,
+        )
+
+
+    # BULK CREATION
+    @classmethod
+    def create_bulk_users(
+        cls,
+        *,
+        creator: CustomUser,
+        users_data: list[dict],
+        role_name: str,
+        school=None,
+        send_email: bool = False,
+    ) -> dict:
+        created = []
+        failed = []
+
+        for index, data in enumerate(users_data):
             try:
-                user = UserCreationService.create_user(
+                user = cls.create_user(
                     creator=creator,
                     school=school,
                     user_data=data,
                     role_name=role_name,
-                    send_email=send_email
+                    send_email=send_email,
                 )
-                results["created"].append({
-                    "index": idx,
+                created.append({
+                    "index": index,
                     "user_id": str(user.id),
                     "login_id": user.login_id,
-                    "full_name": user.get_full_name(),
                 })
             except Exception as exc:
-                results["failed"].append({
-                    "index": idx,
-                    "data": data,
-                    "error": str(exc)
+                logger.exception("Failed to create user at index %s", index)
+                failed.append({
+                    "index": index,
+                    "error": str(exc),
                 })
-                logger.error(f"Bulk creation failed at index {idx}: {exc}")
 
-        return results
+        return {
+            "created": created,
+            "failed": failed,
+            "total_requested": len(users_data),
+            "total_created": len(created),
+            "total_failed": len(failed),
+        }

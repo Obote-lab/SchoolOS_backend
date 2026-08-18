@@ -5,12 +5,12 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from accounts.services.user_creation_services import UserCreationService
-from schools.models import School
-from ..models import ParentGuardian, Student, StudentMedicalHistory
+from ..models import ParentGuardian, StudentProfile, StudentMedicalHistory
+from core.choices.students import StudentStatusChoices, StudentCategoryChoices
+from core.choices.common import GenderChoices as StudentGenderChoices
+from ..utils import validate_age 
 
-
-
-#   Utility / Nested Serializers
+#  SIMPLE / NESTED SERIALIZERS
 class ParentGuardianSimpleSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source="user.get_full_name", read_only=True)
     phone = serializers.CharField(source="user.phone", read_only=True)
@@ -18,7 +18,7 @@ class ParentGuardianSimpleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParentGuardian
         fields = [
-            "id",
+            "user",
             "full_name",
             "phone",
             "relationship",
@@ -31,37 +31,43 @@ class ParentGuardianSimpleSerializer(serializers.ModelSerializer):
 
 class StudentSimpleSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source="user.get_full_name", read_only=True)
-    class_name = serializers.CharField(source="current_class.classroom_name", read_only=True, allow_null=True)
+    class_name = serializers.CharField(
+        source="current_class.classroom_name", read_only=True, allow_null=True
+    )
+    age = serializers.IntegerField(read_only=True)
 
     class Meta:
-        model = Student
+        model = StudentProfile
         fields = [
-            "id",
+            "user",
             "admission_number",
             "full_name",
             "class_name",
+            "age",
             "gender",
             "student_status",
             "student_category",
             "admission_date",
+            "risk_score",
         ]
         read_only_fields = fields
 
 
-
-#   Student Serializers
+#  MAIN STUDENT SERIALIZERS
 class StudentSerializer(serializers.ModelSerializer):
-    """Full detail serializer for Student"""
+    """Full detail serializer for StudentProfile"""
+
     full_name = serializers.CharField(source="user.get_full_name", read_only=True)
     age = serializers.IntegerField(read_only=True)
-    class_name = serializers.CharField(source="current_class.classroom_name", read_only=True, allow_null=True)
+    class_name = serializers.CharField(
+        source="current_class.classroom_name", read_only=True, allow_null=True
+    )
     school_name = serializers.CharField(source="school.school_name", read_only=True)
-    parents = ParentGuardianSimpleSerializer(source="guardians", many=True, read_only=True)
+    parents = ParentGuardianSimpleSerializer(many=True, read_only=True)
 
     class Meta:
-        model = Student
+        model = StudentProfile
         fields = [
-            "id",
             "admission_number",
             "user",
             "full_name",
@@ -86,9 +92,14 @@ class StudentSerializer(serializers.ModelSerializer):
             "boarding_house",
             "student_category",
             "sponsor",
+            "talents",
+            "learning_style",
+            "academic_potential",
+            "risk_score",
             "student_status",
             "status_reason",
             "exit_date",
+            "exit_notes",
             "parents",
             "current_academic_year",
             "current_term",
@@ -96,7 +107,6 @@ class StudentSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = [
-            "id",
             "full_name",
             "age",
             "class_name",
@@ -109,15 +119,15 @@ class StudentSerializer(serializers.ModelSerializer):
 
 class StudentCreateSerializer(serializers.ModelSerializer):
     """Create a new student + linked user account"""
+
     first_name = serializers.CharField(write_only=True)
     last_name = serializers.CharField(write_only=True)
     email = serializers.EmailField(write_only=True, required=False, allow_blank=True)
     phone = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
-        model = Student
+        model = StudentProfile
         fields = [
-            "admission_number",
             "current_class",
             "admission_date",
             "date_of_birth",
@@ -142,67 +152,81 @@ class StudentCreateSerializer(serializers.ModelSerializer):
     def validate(self, data):
         request = self.context["request"]
         creator = request.user
-        school = creator.school
+        school = getattr(request, "school", None) or creator.school
 
-        # School must match creator's school (unless system admin)
-        if not creator.is_superuser and school != creator.school:
-            raise serializers.ValidationError({"school": "Cannot create student for another school"})
+        if not school and not creator.is_superuser:
+            raise serializers.ValidationError(
+                {"school": "School context is required."}
+            )
 
-        # Class capacity check
         current_class = data.get("current_class")
-        if current_class and current_class.school != school:
-            raise serializers.ValidationError({"current_class": "Class does not belong to this school"})
+        if current_class and school and current_class.school_id != school.id:
+            raise serializers.ValidationError(
+                {"current_class": "Class does not belong to this school."}
+            )
 
-        if current_class and current_class.current_enrollment >= current_class.capacity:
-            raise serializers.ValidationError({"current_class": "Class is already at full capacity"})
-
-        # Age validation (re-use model logic)
         dob = data.get("date_of_birth")
         if dob:
-            from .utils import validate_age
             validate_age(dob)
 
         return data
 
+    
     @transaction.atomic
     def create(self, validated_data):
         request = self.context["request"]
         creator = request.user
-        school = creator.school
 
-        # Extract user creation fields
+        # Prefer school from request context (middleware), fallback to creator.school
+        school = getattr(request, "school", None) or creator.school
+        if not school:
+            raise serializers.ValidationError(
+                {"school": "School context is required to create a student."}
+            )
+
         user_data = {
             "first_name": validated_data.pop("first_name"),
             "last_name": validated_data.pop("last_name"),
-            "email": validated_data.pop("email", None),
-            "phone": validated_data.pop("phone", None),
-            "gender": validated_data.get("gender"),
+            "email": validated_data.pop("email", None) or None,
+            "phone": validated_data.pop("phone", None) or None,
+            "user_gender": validated_data.get("gender"),
         }
 
-        # Create user via service (generates login_id, etc.)
-        result = UserCreationService.create_user(
+        # Remove empty strings
+        user_data = {k: v for k, v in user_data.items() if v}
+
+        user = UserCreationService.create_user(
             creator=creator,
             school=school,
-            user_type="STU",
-            user_data=user_data
+            user_data=user_data,
+            role_name="Student",
+            send_email=True,
         )
-        user = result["user"]
 
-        # Create student profile
-        student = Student.objects.create(
+        student = StudentProfile.objects.create(
             user=user,
             school=school,
-            **validated_data
+            **validated_data,
         )
+        # student.sync_identity_fields_to_user()
+
+        # Optional defaults from school
+        if not student.current_academic_year and getattr(school, "current_academic_year_id", None):
+            student.current_academic_year = school.current_academic_year_id
+        if not student.current_term and getattr(school, "current_term_id", None):
+            student.current_term= school.current_term_id
+        if student.current_academic_year or student.current_term:
+            student.save(
+                update_fields=["current_academic_year", "current_term"],
+                validate=False,
+            )
 
         return student
 
 
 class StudentUpdateSerializer(serializers.ModelSerializer):
-    """Update existing student (limited fields)"""
-
     class Meta:
-        model = Student
+        model = StudentProfile
         fields = [
             "current_class",
             "allergies",
@@ -220,21 +244,11 @@ class StudentUpdateSerializer(serializers.ModelSerializer):
             "exit_date",
         ]
 
-    def validate_current_class(self, value):
-        if value and value.current_enrollment >= value.capacity:
-            raise serializers.ValidationError("Class is already at full capacity")
-        return value
-
-    def validate_exit_date(self, value):
-        if value and value > timezone.now().date():
-            raise serializers.ValidationError("Exit date cannot be in the future")
-        return value
-
 
 class StudentStatusUpdateSerializer(serializers.Serializer):
-    """Dedicated serializer for changing student status"""
-
-    student_status = serializers.ChoiceField(choices=Student.StudentStatusChoices.choices)
+    student_status = serializers.ChoiceField(
+        choices=StudentStatusChoices.choices
+    )
     reason = serializers.CharField(required=False, allow_blank=True)
     exit_date = serializers.DateField(required=False)
 
@@ -242,18 +256,17 @@ class StudentStatusUpdateSerializer(serializers.Serializer):
         student = self.context["student"]
         new_status = data["student_status"]
 
-        # Basic transition rules (expand as needed)
         terminal_statuses = {
-            Student.StudentStatusChoices.TRANSFERRED,
-            Student.StudentStatusChoices.GRADUATED,
-            Student.StudentStatusChoices.EXPELLED,
-            Student.StudentStatusChoices.WITHDRAWN,
+            StudentStatusChoices.TRANSFERRED,
+            StudentStatusChoices.GRADUATED,
+            StudentStatusChoices.EXPELLED,
+            StudentStatusChoices.WITHDRAWN,
         }
 
         if new_status in terminal_statuses and not data.get("exit_date"):
-            raise serializers.ValidationError({
-                "exit_date": f"Required when changing to {new_status}"
-            })
+            raise serializers.ValidationError(
+                {"exit_date": f"Exit date is required for status {new_status}"}
+            )
 
         if new_status == student.student_status:
             raise serializers.ValidationError("Status is already set to this value")
@@ -261,24 +274,20 @@ class StudentStatusUpdateSerializer(serializers.Serializer):
         return data
 
 
-
-#   ParentGuardian Serializers
+#  PARENT GUARDIAN SERIALIZERS 
 class ParentGuardianSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source="user.get_full_name", read_only=True)
     phone = serializers.CharField(source="user.phone", read_only=True)
     email = serializers.CharField(source="user.email", read_only=True)
-    student_name = serializers.CharField(source="student.full_name", read_only=True)
 
     class Meta:
         model = ParentGuardian
         fields = [
-            "id",
+            # "id",
             "user",
             "full_name",
             "phone",
             "email",
-            "student",
-            "student_name",
             "relationship",
             "is_primary",
             "can_pickup",
@@ -287,28 +296,22 @@ class ParentGuardianSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = [
-            "id",
-            "full_name",
-            "phone",
-            "email",
-            "student_name",
-            "created_at",
-            "updated_at",
-        ]
+        read_only_fields = ["id", "full_name", "phone", "email", "created_at", "updated_at"]
 
 
 class ParentGuardianCreateSerializer(serializers.ModelSerializer):
+    """Create Parent + User + link to student(s)"""
+
     first_name = serializers.CharField(write_only=True)
     last_name = serializers.CharField(write_only=True)
     email = serializers.EmailField(write_only=True, required=False, allow_blank=True)
-    phone = serializers.CharField(write_only=True)
-    password = serializers.CharField(write_only=True, style={"input_type": "password"})
+    phone = serializers.CharField(write_only=True, required=True)
+    password = serializers.CharField(write_only=True, style={"input_type": "password"}, required=False)
 
     class Meta:
         model = ParentGuardian
         fields = [
-            "student",
+            "students",
             "relationship",
             "is_primary",
             "can_pickup",
@@ -322,48 +325,57 @@ class ParentGuardianCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        student = data["student"]
-        creator = self.context["request"].user
+        request = self.context["request"]
+        creator = request.user
+        students = data.get("students", [])
 
-        if student.school != creator.school and not creator.is_superuser:
-            raise serializers.ValidationError("Cannot add parent to student from another school")
-
+        if students:
+            for student in students:
+                if student.school != creator.school and not creator.is_superuser:
+                    raise serializers.ValidationError(
+                        {"students": "Cannot add parent to student from another school"}
+                    )
         return data
+    
 
     @transaction.atomic
     def create(self, validated_data):
         request = self.context["request"]
         creator = request.user
-        school = creator.school
-        student = validated_data.pop("student")
+        school = getattr(request, "school", None) or creator.school
+
+        students = validated_data.pop("students", [])
+        password = validated_data.pop("password", None)
 
         user_data = {
             "first_name": validated_data.pop("first_name"),
             "last_name": validated_data.pop("last_name"),
-            "email": validated_data.pop("email", None),
+            "email": validated_data.pop("email", None) or None,
             "phone": validated_data.pop("phone"),
         }
+        user_data = {k: v for k, v in user_data.items() if v}
 
-        result = UserCreationService.create_user(
+        user = UserCreationService.create_user(
             creator=creator,
             school=school,
-            user_type="PAR",
-            user_data=user_data
+            user_data=user_data,
+            role_name="Parent",
+            send_email=True,
         )
-        user = result["user"]
-        user.set_password(validated_data.pop("password"))
-        user.save(update_fields=["password"])
 
-        parent = ParentGuardian.objects.create(
-            user=user,
-            student=student,
-            **validated_data
-        )
+        if password:
+            user.set_password(password)
+            user.save(update_fields=["password"])
+
+        parent = ParentGuardian.objects.create(user=user, **validated_data)
+
+        if students:
+            parent.students.set(students)
 
         return parent
 
 
-#   Medical History Serializers
+#  MEDICAL HISTORY SERIALIZERS 
 class StudentMedicalHistorySerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     admission_number = serializers.CharField(source="student.admission_number", read_only=True)
@@ -372,7 +384,7 @@ class StudentMedicalHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = StudentMedicalHistory
         fields = [
-            "id",
+            # "id",
             "student",
             "student_name",
             "admission_number",
@@ -387,13 +399,7 @@ class StudentMedicalHistorySerializer(serializers.ModelSerializer):
             "logged_by_name",
             "created_at",
         ]
-        read_only_fields = [
-            "id",
-            "student_name",
-            "admission_number",
-            "logged_by_name",
-            "created_at",
-        ]
+        read_only_fields = ["student_name", "admission_number", "logged_by_name", "created_at"]
 
 
 class MedicalHistoryCreateSerializer(serializers.ModelSerializer):
@@ -417,19 +423,20 @@ class MedicalHistoryCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-
-#   Search / Utility Serializers
+#  SEARCH SERIALIZER 
 class StudentSearchSerializer(serializers.Serializer):
     q = serializers.CharField(required=False, allow_blank=True)
     school = serializers.UUIDField(required=False)
     current_class = serializers.UUIDField(required=False)
     student_status = serializers.ChoiceField(
-        choices=Student.StudentStatusChoices.choices, required=False
+        choices=StudentStatusChoices.choices, required=False
     )
     student_category = serializers.ChoiceField(
-        choices=Student.StudentCategoryChoices.choices, required=False
+        choices=StudentCategoryChoices.choices, required=False
     )
-    gender = serializers.ChoiceField(choices=Student.GenderChoices.choices, required=False)
+    gender = serializers.ChoiceField(
+        choices=StudentGenderChoices.choices, required=False
+    )
 
     def validate(self, data):
         if not any(data.values()):

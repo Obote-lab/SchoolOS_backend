@@ -1,14 +1,17 @@
 from django.contrib import admin
+from django.utils import timezone
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
-from .models import ParentGuardian, Student, StudentMedicalHistory
+
+from core.choices.students import StudentStatusChoices
+from .models import ParentGuardian, StudentMedicalHistory, StudentProfile
 
 
-@admin.register(Student)
+@admin.register(StudentProfile)
 class StudentAdmin(admin.ModelAdmin):
     list_display = (
         "admission_number",
-        "full_name_link",
+        "full_name_display",
         "school",
         "current_class_display",
         "gender",
@@ -34,10 +37,17 @@ class StudentAdmin(admin.ModelAdmin):
         "kcpe_index",
     )
     date_hierarchy = "admission_date"
-    readonly_fields = ("age", "created_at", "updated_at", "full_name")
-    raw_id_fields = ("user", "school", "current_class", "boarding_house",
-                     "current_academic_year", "current_term")
+    readonly_fields = ("age", "created_at", "updated_at")
+    raw_id_fields = (
+        "user",
+        "school",
+        "current_class",
+        "boarding_house",
+        "current_academic_year",
+        "current_term",
+    )
     list_per_page = 25
+    ordering = ("admission_number",)
 
     fieldsets = (
         (_("Core Information"), {
@@ -51,6 +61,7 @@ class StudentAdmin(admin.ModelAdmin):
                 "student_status",
                 "status_reason",
                 "exit_date",
+                "exit_notes",
             )
         }),
         (_("Personal Details"), {
@@ -58,8 +69,20 @@ class StudentAdmin(admin.ModelAdmin):
                 "date_of_birth",
                 "age",
                 "gender",
+                "religion",
                 "nationality",
                 "county_of_origin",
+                "sub_county_of_origin",
+            ),
+            "classes": ("collapse",),
+        }),
+        (_("Health"), {
+            "fields": (
+                "disability",
+                "disability_details",
+                "blood_group",
+                "allergies",
+                "chronic_conditions",
             ),
             "classes": ("collapse",),
         }),
@@ -72,10 +95,7 @@ class StudentAdmin(admin.ModelAdmin):
             )
         }),
         (_("Academic & Entry Info"), {
-            "fields": (
-                "previous_school",
-                "kcpe_index",
-            ),
+            "fields": ("previous_school", "kcpe_index"),
             "classes": ("collapse",),
         }),
         (_("Boarding"), {
@@ -83,7 +103,7 @@ class StudentAdmin(admin.ModelAdmin):
             "classes": ("collapse",),
         }),
         (_("Classification"), {
-            "fields": ("student_category", "sponsor"),
+            "fields": ("student_category", "sponsor", "sponsor_contact"),
         }),
         (_("Current Academic Context"), {
             "fields": ("current_academic_year", "current_term"),
@@ -95,33 +115,34 @@ class StudentAdmin(admin.ModelAdmin):
         }),
     )
 
-    def full_name_link(self, obj):
-        return format_html(
-            '<a href="{}">{}</a>',
-            obj.user.get_absolute_url() if hasattr(obj.user, 'get_absolute_url') else '#',
-            obj.full_name
-        )
-    full_name_link.short_description = _("Name")
-    full_name_link.admin_order_field = "user__first_name"
+    def full_name_display(self, obj):
+        return obj.full_name
+
+    full_name_display.short_description = _("Name")
+    full_name_display.admin_order_field = "user__first_name"
 
     def current_class_display(self, obj):
         return obj.current_class.classroom_name if obj.current_class else _("Not Assigned")
+
     current_class_display.short_description = _("Class")
 
     def student_status_colored(self, obj):
         colors = {
-            Student.StudentStatusChoices.ACTIVE: "green",
-            Student.StudentStatusChoices.SUSPENDED: "orange",
-            Student.StudentStatusChoices.EXPELLED: "red",
-            Student.StudentStatusChoices.TRANSFERRED: "purple",
-            Student.StudentStatusChoices.GRADUATED: "blue",
-            Student.StudentStatusChoices.WITHDRAWN: "gray",
+            StudentStatusChoices.ACTIVE: "green",
+            StudentStatusChoices.SUSPENDED: "orange",
+            StudentStatusChoices.EXPELLED: "red",
+            StudentStatusChoices.TRANSFERRED: "purple",
+            StudentStatusChoices.GRADUATED: "blue",
+            StudentStatusChoices.WITHDRAWN: "gray",
+            StudentStatusChoices.DECEASED: "black",
         }
         color = colors.get(obj.student_status, "black")
         return format_html(
             '<span style="color: {}; font-weight: bold;">{}</span>',
-            color, obj.get_student_status_display()
+            color,
+            obj.get_student_status_display(),
         )
+
     student_status_colored.short_description = _("Status")
     student_status_colored.admin_order_field = "student_status"
 
@@ -129,44 +150,42 @@ class StudentAdmin(admin.ModelAdmin):
 @admin.register(ParentGuardian)
 class ParentGuardianAdmin(admin.ModelAdmin):
     list_display = (
-        "full_name",
-        "student_link",
+        "full_name_display",
         "relationship",
         "is_primary_badge",
         "can_pickup",
         "can_consent",
+        "students_count",
     )
     list_filter = (
         "relationship",
         "is_primary",
         "can_pickup",
         "can_consent",
-        "student__school",
     )
     search_fields = (
         "user__first_name",
         "user__last_name",
         "user__phone",
         "user__email",
-        "student__admission_number",
+        "students__admission_number",
     )
-    raw_id_fields = ("user", "student")
+    raw_id_fields = ("user",)
+    filter_horizontal = ("students",)   # because it is ManyToMany
     list_per_page = 25
+    readonly_fields = ("created_at", "updated_at")
 
     fieldsets = (
         (_("Core"), {
             "fields": (
                 "user",
-                "student",
+                "students",
                 "relationship",
                 "is_primary",
             )
         }),
         (_("Permissions"), {
-            "fields": (
-                "can_pickup",
-                "can_consent",
-            )
+            "fields": ("can_pickup", "can_consent"),
         }),
         (_("Extra Contact"), {
             "fields": ("alternate_phone",),
@@ -178,29 +197,31 @@ class ParentGuardianAdmin(admin.ModelAdmin):
         }),
     )
 
-    def full_name(self, obj):
-        return obj.full_name
-    full_name.short_description = _("Name")
+    def full_name_display(self, obj):
+        return obj.user.get_full_name()
 
-    def student_link(self, obj):
-        return format_html(
-            '<a href="{}">{}</a>',
-            f"/admin/students/student/{obj.student.id}/change/",
-            f"{obj.student.admission_number} - {obj.student.full_name}"
-        )
-    student_link.short_description = _("Student")
+    full_name_display.short_description = _("Name")
+    full_name_display.admin_order_field = "user__first_name"
 
     def is_primary_badge(self, obj):
         if obj.is_primary:
-            return format_html('<span style="background:#4CAF50;color:white;padding:4px 8px;border-radius:4px;">PRIMARY</span>')
-        return "-"
+            return format_html(
+                '<span style="background:#4CAF50;color:white;padding:3px 8px;border-radius:4px;font-size:11px;">PRIMARY</span>'
+            )
+        return "—"
+
     is_primary_badge.short_description = _("Primary")
+
+    def students_count(self, obj):
+        return obj.students.count()
+
+    students_count.short_description = _("Students")
 
 
 @admin.register(StudentMedicalHistory)
 class StudentMedicalHistoryAdmin(admin.ModelAdmin):
     list_display = (
-        "student_link",
+        "student_display",
         "record_type",
         "date",
         "doctor_name",
@@ -208,8 +229,7 @@ class StudentMedicalHistoryAdmin(admin.ModelAdmin):
     )
     list_filter = (
         "record_type",
-        "date",
-        "follow_up_date",
+        ("date", admin.DateFieldListFilter),
         "student__school",
     )
     search_fields = (
@@ -224,21 +244,14 @@ class StudentMedicalHistoryAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
     raw_id_fields = ("student", "logged_by")
     list_per_page = 20
+    ordering = ("-date",)
 
     fieldsets = (
         (_("Record"), {
-            "fields": (
-                "student",
-                "record_type",
-                "date",
-                "description",
-            )
+            "fields": ("student", "record_type", "date", "description"),
         }),
         (_("Provider"), {
-            "fields": (
-                "doctor_name",
-                "hospital",
-            )
+            "fields": ("doctor_name", "hospital"),
         }),
         (_("Follow-up"), {
             "fields": ("follow_up_date", "medication"),
@@ -249,24 +262,23 @@ class StudentMedicalHistoryAdmin(admin.ModelAdmin):
         }),
     )
 
-    def student_link(self, obj):
-        return format_html(
-            '<a href="{}">{}</a>',
-            f"/admin/students/student/{obj.student.id}/change/",
-            f"{obj.student.admission_number} - {obj.student.full_name}"
-        )
-    student_link.short_description = _("Student")
+    def student_display(self, obj):
+        return f"{obj.student.admission_number} – {obj.student.full_name}"
+
+    student_display.short_description = _("Student")
+    student_display.admin_order_field = "student__admission_number"
 
     def follow_up_status(self, obj):
-        if obj.follow_up_date:
-            if obj.follow_up_date >= timezone.now().date():
-                return format_html(
-                    '<span style="color:orange;font-weight:bold;">Pending ({})</span>',
-                    obj.follow_up_date
-                )
+        if not obj.follow_up_date:
+            return "—"
+        if obj.follow_up_date >= timezone.now().date():
             return format_html(
-                '<span style="color:gray;">Past ({})</span>',
-                obj.follow_up_date
+                '<span style="color:orange;font-weight:bold;">Pending ({})</span>',
+                obj.follow_up_date,
             )
-        return "-"
+        return format_html(
+            '<span style="color:gray;">Past ({})</span>',
+            obj.follow_up_date,
+        )
+
     follow_up_status.short_description = _("Follow-up")

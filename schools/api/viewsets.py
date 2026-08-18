@@ -1,43 +1,57 @@
 from django.contrib.gis.geos import Point
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import permissions, status, viewsets, generics
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
+from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.db import transaction
-
-
 from accounts.api.permissions import HasPermission
 from accounts.models import UserRole
 from ..models import AcademicYear, ClassRoom, Department, School, Term
 from ..services.onboarding import SchoolOnboardingService
+from core.choices.schools import OnboardingStatusChoices
 from .serializers import (
     AcademicYearSerializer,
     AcademicYearSimpleSerializer,
     ClassRoomSerializer,
     ClassRoomSimpleSerializer,
     DepartmentSerializer,
+    RegionalAdminCreateSchoolSerializer,
     SchoolCreateSerializer,
+    SchoolSearchSerializer,
     SchoolSerializer,
     SchoolSimpleSerializer,
     SchoolUpdateSerializer,
-    TermSerializer,
-    SystemSchoolOnboardSerializer,
     SystemBulkOnboardSerializer,
-    RegionalAdminCreateSchoolSerializer,
-    SchoolSearchSerializer
+    SystemSchoolOnboardSerializer,
+    TermSerializer,
 )
 
 
 # SCHOOL VIEWSET
+@extend_schema_view(
+    list=extend_schema(summary="List schools"),
+    retrieve=extend_schema(summary="Get school", responses={200: SchoolSerializer}),
+    create=extend_schema(
+        summary="Create school + principal",
+        request=SchoolCreateSerializer,
+        responses={201: SchoolSerializer},
+    ),
+    update=extend_schema(request=SchoolUpdateSerializer),
+    partial_update=extend_schema(request=SchoolUpdateSerializer),
+    destroy=extend_schema(summary="Delete school"),
+)
 class SchoolViewSet(viewsets.ModelViewSet):
     """
     Main endpoint for school CRUD and onboarding operations.
     Permissions enforced via HasPermission + PermissionMatrix.
     """
+
     module = "schools"
     queryset = School.objects.all().order_by("school_name")
     permission_classes = [permissions.IsAuthenticated, HasPermission]
@@ -69,147 +83,203 @@ class SchoolViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        # You might want to add .select_related() / .prefetch_related() later
-        return School.objects.all().order_by("school_name")
+        qs = School.objects.all().select_related( "principal", "deputy_academic", "deputy_admin", "created_by" ).order_by("school_name")
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+
+        school = getattr(self.request, "school", None)
+        if school is not None:
+            return qs.filter(pk=school.pk)
+
+        has_elevated = user.user_roles.filter(is_active=True,role__name__in=["Regional Admin", "County Admin", "System Root"],).exists()
+        if has_elevated:
+            return qs
+        # School-level staff: only schools from their roles
+        return qs.filter(Q(user_roles__user=user, user_roles__is_active=True)| Q(principal=user)).distinct()
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
 
-    # ── Status actions 
+
+    # ── Status actions
+    @extend_schema(responses={200: SchoolSerializer})
     @action(detail=True, methods=["post"])
     def activate(self, request, pk=None):
         school = self.get_object()
         school.is_active = True
         school.save(update_fields=["is_active"])
-        return Response({
-            "message": f"School {school.school_name} activated",
-            "school": SchoolSerializer(school).data
-        })
+        return Response(
+            {
+                "message": f"School {school.school_name} activated",
+                "school": SchoolSerializer(school).data,
+            }
+        )
 
+    @extend_schema(responses={200: SchoolSerializer})
     @action(detail=True, methods=["post"])
     def deactivate(self, request, pk=None):
         school = self.get_object()
         school.is_active = False
         school.save(update_fields=["is_active"])
-        return Response({
-            "message": f"School {school.school_name} deactivated",
-            "school": SchoolSerializer(school).data
-        })
+        return Response(
+            {
+                "message": f"School {school.school_name} deactivated",
+                "school": SchoolSerializer(school).data,
+            }
+        )
 
-    # ── Onboarding actions 
+    # ── Onboarding actions
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=True, methods=["get"])
     def onboarding_status(self, request, pk=None):
         school = self.get_object()
-        checklist = SchoolOnboardingService.get_onboarding_checklist(school)
+        checklist = {}
         return Response({
             "school": SchoolSerializer(school).data,
-            "checklist": checklist
+            "checklist": checklist,
         })
 
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT})
     @action(detail=True, methods=["post"])
     def setup_structures(self, request, pk=None):
         school = self.get_object()
         if school.onboarding_status not in [
-            School.OnboardingStatusChoices.PENDING,
-            School.OnboardingStatusChoices.PRINCIPAL_CREATED
+            OnboardingStatusChoices.PENDING,
+            OnboardingStatusChoices.PRINCIPAL_CREATED,
         ]:
-            return Response({"error": "Structures can only be set up in early onboarding stages"}, status=400)
+            return Response(
+                {"error": "Structures can only be set up in early onboarding stages"},
+                status=400,
+            )
 
         try:
             result = SchoolOnboardingService.setup_basic_structures(school, request.user)
             return Response({
                 "message": "Basic structures (academic year, terms, classrooms) created",
                 "result": result,
-                "school": SchoolSerializer(school).data
+                "school": SchoolSerializer(school).data,
             })
         except ValueError as e:
             return Response({"error": str(e)}, status=400)
 
+
+    @extend_schema(responses={200: SchoolSerializer, 400: OpenApiTypes.OBJECT})
     @action(detail=True, methods=["post"])
     def complete_onboarding(self, request, pk=None):
         school = self.get_object()
         try:
             SchoolOnboardingService.complete_onboarding(school, request.user)
-            return Response({
-                "message": "School onboarding marked as complete",
-                "school": SchoolSerializer(school).data
-            })
+            return Response(
+                {
+                    "message": "School onboarding marked as complete",
+                    "school": SchoolSerializer(school).data,
+                }
+            )
         except ValueError as e:
             return Response({"error": str(e)}, status=400)
 
     # ── Enrollment management
+    @extend_schema(
+    request={"application/json": {"type": "object", "properties": {"change": {"type": "integer"}}}},
+    responses={200: SchoolSerializer, 400: OpenApiTypes.OBJECT},
+    )
     @action(detail=True, methods=["post"])
     def update_enrollment(self, request, pk=None):
         school = self.get_object()
         change = request.data.get("change")
         if change is None:
-            return Response({"error": "Field 'change' is required (integer)"}, status=400)
+            return Response(
+                {"error": "Field 'change' is required (integer)"}, status=400
+            )
 
         try:
             change = int(change)
             school.update_enrollment(change)
-            return Response({
-                "message": f"Enrollment updated by {change}",
-                "current_enrollment": school.current_enrollment,
-                "school": SchoolSerializer(school).data
-            })
+            return Response(
+                {
+                    "message": f"Enrollment updated by {change}",
+                    "current_enrollment": school.current_enrollment,
+                    "school": SchoolSerializer(school).data,
+                }
+            )
         except (ValueError, ValidationError) as e:
             return Response({"error": str(e)}, status=400)
 
-    #  Search & statistics 
+    #  Search & statistics
+    @extend_schema(
+    parameters=[
+        OpenApiParameter("q", str, required=False),
+        OpenApiParameter("county", str, required=False),
+        OpenApiParameter("school_type", str, required=False),
+        OpenApiParameter("category", str, required=False),
+    ],
+    responses={200: SchoolSimpleSerializer(many=True)},)
     @action(detail=False, methods=["get"])
     def search(self, request):
         query = request.query_params.get("q", "").strip()
         county = request.query_params.get("county")
-        school_type = request.query_params.get("type")
+        school_type = request.query_params.get("school_type")
         category = request.query_params.get("category")
 
         qs = School.objects.filter(is_active=True)
 
         if query:
             qs = qs.filter(
-                Q(school_name__icontains=query) |
-                Q(school_code__icontains=query) |
-                Q(county__icontains=query) |
-                Q(sub_county__icontains=query)
+                Q(school_name__icontains=query)
+                | Q(school_code__icontains=query)
+                | Q(county__icontains=query)
+                | Q(sub_county__icontains=query)
             )
         if county:
             qs = qs.filter(county__icontains=county)
         if school_type:
-            qs = qs.filter(type=school_type)
+            qs = qs.filter(school_type=school_type)
         if category:
             qs = qs.filter(school_category=category)
 
         page = self.paginate_queryset(qs)
         if page is not None:
-            return self.get_paginated_response(SchoolSimpleSerializer(page, many=True).data)
+            return self.get_paginated_response(
+                SchoolSimpleSerializer(page, many=True).data
+            )
 
         return Response(SchoolSimpleSerializer(qs, many=True).data)
 
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"])
     def statistics(self, request):
         qs = School.objects.all()
         total_capacity = qs.aggregate(total=Sum("capacity"))["total"] or 0
         total_enrollment = qs.aggregate(total=Sum("current_enrollment"))["total"] or 0
 
-        return Response({
-            "total_schools": qs.count(),
-            "active_schools": qs.filter(is_active=True).count(),
-            "total_capacity": total_capacity,
-            "total_enrollment": total_enrollment,
-            "total_vacancies": total_capacity - total_enrollment,
-            "overall_enrollment_rate": round(
-                (total_enrollment / total_capacity * 100) if total_capacity > 0 else 0, 1
-            ),
-            "by_type": list(qs.values("type").annotate(count=Count("id"))),
-            "by_category": list(qs.values("school_category").annotate(count=Count("id"))),
-            "by_county_top10": list(
-                qs.values("county")
-                  .annotate(count=Count("id"), enrollment=Sum("current_enrollment"))
-                  .order_by("-count")[:10]
-            )
-        })
-
+        return Response(
+            {
+                "total_schools": qs.count(),
+                "active_schools": qs.filter(is_active=True).count(),
+                "total_capacity": total_capacity,
+                "total_enrollment": total_enrollment,
+                "total_vacancies": total_capacity - total_enrollment,
+                "overall_enrollment_rate": round(
+                    (
+                        (total_enrollment / total_capacity * 100)
+                        if total_capacity > 0
+                        else 0
+                    ),
+                    1,
+                ),
+                "by_type": list(qs.values("school_type").annotate(count=Count("id"))),
+                "by_category": list(
+                    qs.values("school_category").annotate(count=Count("id"))
+                ),
+                "by_county_top10": list(
+                    qs.values("county")
+                    .annotate(count=Count("id"), enrollment=Sum("current_enrollment"))
+                    .order_by("-count")[:10]
+                ),
+            }
+        )
 
 
 # ACADEMIC YEAR VIEWSET
@@ -225,27 +295,37 @@ class AcademicYearViewSet(viewsets.ModelViewSet):
         return AcademicYearSerializer
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy", "set_current"]:
+        if self.action in [
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "set_current",
+        ]:
             self.required_action = "manage"
         else:
             self.required_action = "read"
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().select_related("school")
         school_id = self.request.query_params.get("school")
         if school_id:
-            qs = qs.filter(school_id=school_id)
+            return qs.filter(school_id=school_id)
+        school = getattr(self.request, "school", None)
+        if school is not None:
+            return qs.filter(school_id=school.pk)
         return qs
 
     @action(detail=True, methods=["post"])
     def set_current(self, request, pk=None):
         year = self.get_object()
-        AcademicYear.objects.filter(school=year.school).exclude(pk=year.pk).update(is_current=False)
+        AcademicYear.objects.filter(school=year.school).exclude(pk=year.pk).update(
+            is_current=False
+        )
         year.is_current = True
         year.save(update_fields=["is_current"])
         return Response({"message": f"{year.year} is now the current academic year"})
-
 
 
 # TERM VIEWSET
@@ -285,7 +365,13 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         return ClassRoomSerializer
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy", "update_student_count"]:
+        if self.action in [
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "update_student_count",
+        ]:
             self.required_action = "manage"
         else:
             self.required_action = "read"
@@ -293,16 +379,24 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        school_id = self.request.query_params.get("school") or getattr(self.request, "school", None)
-        if school_id:
-            qs = qs.filter(school_id=school_id)
+        school_param = self.request.query_params.get("school")
+        if school_param:
+            return qs.filter(school_id=school_param)
+
+        school = getattr(self.request, "school", None)
+        if school is not None:
+            return qs.filter(school_id=school.pk)  # use .pk
         return qs
 
     @action(detail=False, methods=["get"])
     def by_school(self, request):
-        school_id = request.query_params.get("school") or getattr(request, "school", None)
+        school_id = request.query_params.get("school") or getattr(
+            request, "school", None
+        )
         if not school_id:
-            return Response({"error": "school id required (query param or context)"}, status=400)
+            return Response(
+                {"error": "school id required (query param or context)"}, status=400
+            )
 
         qs = self.get_queryset().filter(school_id=school_id)
         grouped = {}
@@ -315,19 +409,22 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         classroom = self.get_object()
         change = request.data.get("change")
         if change is None:
-            return Response({"error": "Field 'change' is required (integer)"}, status=400)
+            return Response(
+                {"error": "Field 'change' is required (integer)"}, status=400
+            )
 
         try:
             change = int(change)
             classroom.update_student_count(change)
-            return Response({
-                "message": f"Student count updated by {change}",
-                "current_enrollment": classroom.current_enrollment,
-                "classroom": ClassRoomSerializer(classroom).data
-            })
+            return Response(
+                {
+                    "message": f"Student count updated by {change}",
+                    "current_enrollment": classroom.current_enrollment,
+                    "classroom": ClassRoomSerializer(classroom).data,
+                }
+            )
         except (ValueError, ValidationError) as e:
             return Response({"error": str(e)}, status=400)
-
 
 
 # DEPARTMENT VIEWSET
@@ -338,7 +435,14 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, HasPermission]
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy", "update_budget", "update_member_count"]:
+        if self.action in [
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "update_budget",
+            "update_member_count",
+        ]:
             self.required_action = "manage"
         else:
             self.required_action = "read"
@@ -346,9 +450,14 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        school_id = self.request.query_params.get("school") or getattr(self.request, "school", None)
-        if school_id:
-            qs = qs.filter(school_id=school_id)
+        school_param = self.request.query_params.get("school")
+        if school_param:
+            return qs.filter(school_id=school_param)
+
+        school = getattr(request, "school", None)
+        school_id = request.query_params.get("school") or (school.pk if school else None)
+        if school is not None:
+            return qs.filter(school_id=school.pk)  # use .pk
         return qs
 
     @action(detail=True, methods=["post"])
@@ -361,10 +470,12 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         try:
             dept.budget = float(amount)
             dept.save(update_fields=["budget"])
-            return Response({
-                "message": f"Budget updated to {amount}",
-                "department": DepartmentSerializer(dept).data
-            })
+            return Response(
+                {
+                    "message": f"Budget updated to {amount}",
+                    "department": DepartmentSerializer(dept).data,
+                }
+            )
         except ValueError:
             return Response({"error": "Invalid amount format"}, status=400)
 
@@ -378,72 +489,68 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         try:
             new_count = dept.member_count + int(change)
             if new_count < 0:
-                return Response({"error": "Member count cannot be negative"}, status=400)
+                return Response(
+                    {"error": "Member count cannot be negative"}, status=400
+                )
             dept.member_count = new_count
             dept.save(update_fields=["member_count"])
-            return Response({
-                "message": f"Member count updated by {change}",
-                "department": DepartmentSerializer(dept).data
-            })
+            return Response(
+                {
+                    "message": f"Member count updated by {change}",
+                    "department": DepartmentSerializer(dept).data,
+                }
+            )
         except ValueError:
             return Response({"error": "Invalid change value"}, status=400)
-        
-
 
 
 #  1. Single school onboarding (system/root admin)
+@extend_schema(
+    summary="Onboard one school + principal (system/root only)",
+    request=SystemSchoolOnboardSerializer,
+    responses={
+        201: OpenApiResponse(description="School onboarded", response=SchoolSerializer),
+        400: OpenApiResponse(description="Validation or failure"),
+    },
+)
 class SystemSchoolOnboardingView(APIView):
-    """
-    System/root admin endpoint to onboard one school + principal in one request.
-    """
     permission_classes = [permissions.IsAuthenticated, HasPermission]
     module = "schools"
-    required_action = "create"  
+    required_action = "create"
 
     def post(self, request):
-    
-        serializer = SystemSchoolOnboardSerializer(data=request.data)
+        serializer = SystemSchoolOnboardSerializer(
+            data=request.data, context={"request": request}
+        )
         serializer.is_valid(raise_exception=True)
-
-        try:
-            with transaction.atomic():
-                school, principal_result = SchoolOnboardingService.create_school_with_principal(
-                    school_data=serializer.validated_data["school_data"],
-                    principal_data=serializer.validated_data["principal_data"],
-                    creator=request.user
-                )
-
-                if serializer.validated_data.get("auto_setup_structures", True):
-                    SchoolOnboardingService.setup_basic_structures(school, request.user)
-
-            return Response(
-                {
-                    "message": "School onboarded successfully",
-                    "school": SchoolSerializer(school).data,
-                    "principal": {
-                        "id": str(principal_result["user"].id),
-                        "login_id": principal_result["user"].login_id,
-                        "full_name": principal_result["user"].get_full_name(),
-                        # Never return temp_password here!
-                    },
-                },
-                status=status.HTTP_201_CREATED,
-            )
-
-        except Exception as e:
-            return Response(
-                {"error": f"Failed to onboard school: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-
+        school = serializer.save()  # if create() is on the serializer
+        return Response(
+            {
+                "message": "School onboarded successfully",
+                "school": SchoolSerializer(school).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 #  2. Bulk school onboarding (system/root admin)
+@extend_schema(
+    summary="Bulk onboard multiple schools (system/root only)",
+    request=SystemBulkOnboardSerializer,
+    responses={
+        201: OpenApiResponse(
+            description="Bulk onboarding results",
+            response=OpenApiTypes.OBJECT,  # results dict
+        ),
+        207: OpenApiResponse(description="Partial success"),
+        400: OpenApiResponse(description="Validation or input error"),
+    },
+)
 class SystemBulkOnboardingView(APIView):
     """
     Bulk onboard multiple schools (for system/root admins or chain operators).
     Expects list of {school_data, principal_data} objects.
     """
+
     permission_classes = [permissions.IsAuthenticated, HasPermission]
     module = "schools"
     required_action = "bulk_create"
@@ -454,11 +561,14 @@ class SystemBulkOnboardingView(APIView):
         serializer.is_valid(raise_exception=True)
 
         results = SchoolOnboardingService.bulk_onboard_schools(
-            schools_data=serializer.validated_data["schools"],
-            creator=request.user
+            schools_data=serializer.validated_data["schools"], creator=request.user
         )
 
-        status_code = status.HTTP_201_CREATED if results["successful"] else status.HTTP_207_MULTI_STATUS
+        status_code = (
+            status.HTTP_201_CREATED
+            if results["successful"]
+            else status.HTTP_207_MULTI_STATUS
+        )
 
         return Response(
             {
@@ -474,17 +584,30 @@ class SystemBulkOnboardingView(APIView):
         )
 
 
-
 #  3. School-specific onboarding progress & control
+@extend_schema(
+    summary="View and manage school onboarding progress",
+    description="GET: current status + checklist\nPATCH: update status/progress\nPOST: mark as complete",
+    responses={
+        200: OpenApiResponse(
+            description="Onboarding details",
+            response=SchoolSerializer,  # or OpenApiTypes.OBJECT if no serializer
+        ),
+        400: OpenApiResponse(description="Invalid request"),
+        404: OpenApiResponse(description="School not found"),
+    },
+)
 class SchoolOnboardingProgressView(APIView):
     """
     GET    → view current onboarding status + checklist
     PATCH  → update status/progress (restricted)
     POST   → mark as complete
     """
+
     permission_classes = [permissions.IsAuthenticated, HasPermission]
     module = "schools"
     required_action = "manage_onboarding"
+    serializer_class = SchoolSerializer
 
     def get_permissions(self):
         if self.request.method == "GET":
@@ -493,7 +616,13 @@ class SchoolOnboardingProgressView(APIView):
 
     def get(self, request, school_id):
         school = get_object_or_404(School, id=school_id)
-        checklist = SchoolOnboardingService.get_onboarding_checklist(school)
+        checklist = {
+            "has_principal": school.principal_id is not None,
+            "has_academic_year": school.academic_years.exists(),
+            "has_classrooms": school.classrooms.exists(),
+            "onboarding_status": school.onboarding_status,
+        }
+        # Do not call SchoolOnboardingService.get_onboarding_checklist unless it exists
         return Response({
             "school": SchoolSerializer(school).data,
             "checklist": checklist,
@@ -505,7 +634,11 @@ class SchoolOnboardingProgressView(APIView):
         school = get_object_or_404(School, id=school_id)
 
         # Only allow certain fields to be updated manually
-        allowed_fields = ["onboarding_status", "onboarding_progress", "subscription_tier"]
+        allowed_fields = [
+            "onboarding_status",
+            "onboarding_progress",
+            "subscription_tier",
+        ]
         updates = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         if not updates:
@@ -515,28 +648,42 @@ class SchoolOnboardingProgressView(APIView):
 
         school.save(update_fields=updates.keys())
 
-        return Response({
-            "message": "Onboarding progress updated",
-            "school": SchoolSerializer(school).data
-        })
+        return Response(
+            {
+                "message": "Onboarding progress updated",
+                "school": SchoolSerializer(school).data,
+            }
+        )
 
     def post(self, request, school_id):
         school = get_object_or_404(School, id=school_id)
         try:
             SchoolOnboardingService.complete_onboarding(school, request.user)
-            return Response({
-                "message": "Onboarding marked as complete",
-                "school": SchoolSerializer(school).data
-            })
+            return Response(
+                {
+                    "message": "Onboarding marked as complete",
+                    "school": SchoolSerializer(school).data,
+                }
+            )
         except ValueError as e:
             return Response({"error": str(e)}, status=400)
 
 
 #  4. System-wide onboarding dashboard / overview
+@extend_schema(
+    summary="System-wide onboarding dashboard overview",
+    responses={
+        200: OpenApiResponse(
+            description="Onboarding statistics and summaries",
+            response=OpenApiTypes.OBJECT,  # summary dict
+        )
+    },
+)
 class SystemOnboardingDashboardView(APIView):
     """
     High-level overview for system admins: onboarding stats, pending schools, etc.
     """
+
     permission_classes = [permissions.IsAuthenticated, HasPermission]
     module = "schools"
     required_action = "read_dashboard"
@@ -546,9 +693,9 @@ class SystemOnboardingDashboardView(APIView):
 
         pending = schools.filter(
             onboarding_status__in=[
-                School.OnboardingStatusChoices.PENDING,
-                School.OnboardingStatusChoices.PRINCIPAL_CREATED,
-                School.OnboardingStatusChoices.STRUCTURES_SETUP,
+                OnboardingStatusChoices.PENDING,
+                OnboardingStatusChoices.PRINCIPAL_CREATED,
+                OnboardingStatusChoices.STRUCTURES_SETUP,
             ]
         )
 
@@ -559,40 +706,51 @@ class SystemOnboardingDashboardView(APIView):
                 "in_trial": schools.filter(subscription_tier="FREE_TRIAL").count(),
                 "onboarding_pending": pending.count(),
                 "onboarding_complete": schools.filter(
-                    onboarding_status=School.OnboardingStatusChoices.ACTIVE
+                    onboarding_status=OnboardingStatusChoices.ACTIVE
                 ).count(),
                 "suspended_or_archived": schools.filter(
                     onboarding_status__in=[
-                        School.OnboardingStatusChoices.SUSPENDED,
-                        School.OnboardingStatusChoices.ARCHIVED,
+                        OnboardingStatusChoices.SUSPENDED,
+                        OnboardingStatusChoices.ARCHIVED,
                     ]
                 ).count(),
             },
             "by_status": list(
-                schools.values("onboarding_status").annotate(count=Count("id")).order_by("-count")
+                schools.values("onboarding_status")
+                .annotate(count=Count("id"))
+                .order_by("-count")
             ),
             "by_county": list(
                 schools.values("county")
                 .annotate(
                     count=Count("id"),
-                    pending=Count("id", filter=Q(onboarding_status__in=[
-                        School.OnboardingStatusChoices.PENDING,
-                        School.OnboardingStatusChoices.PRINCIPAL_CREATED,
-                        School.OnboardingStatusChoices.STRUCTURES_SETUP,
-                    ])),
+                    pending=Count(
+                        "id",
+                        filter=Q(
+                            onboarding_status__in=[
+                                OnboardingStatusChoices.PENDING,
+                                OnboardingStatusChoices.PRINCIPAL_CREATED,
+                                OnboardingStatusChoices.STRUCTURES_SETUP,
+                            ]
+                        ),
+                    ),
                 )
                 .order_by("-count")[:15]
             ),
             "needs_attention": list(
                 pending.filter(needs_onboarding_attention=True)
-                .values("id", "school_name", "county", "onboarding_status", "onboarding_progress")
+                .values(
+                    "id",
+                    "school_name",
+                    "county",
+                    "onboarding_status",
+                    "onboarding_progress",
+                )
                 .order_by("onboarded_date")[:10]
             ),
         }
 
         return Response(data)
-    
-
 
 
 #   ADVANCED SCHOOL SEARCH (public / filtered)
@@ -600,24 +758,28 @@ class SchoolSearchView(generics.ListAPIView):
     """
     Advanced search endpoint for schools.
     Supports filtering, partial matching, and basic sorting.
-
     Example usage:
         GET /v1/schools/search/advanced/?q=nairobi&type=secondary&county=Nairobi&min_enrollment=200
     """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = SchoolSimpleSerializer
+    queryset = School.objects.none()
 
     def get_queryset(self):
+        
+        if getattr(self, "swagger_fake_view", False):
+            return School.objects.none()
         queryset = School.objects.filter(is_active=True).select_related("principal")
-
         # Validate and extract search parameters
-        search_params_serializer = SchoolSearchSerializer(data=self.request.query_params)
+        search_params_serializer = SchoolSearchSerializer(
+            data=self.request.query_params
+        )
         search_params_serializer.is_valid(raise_exception=True)
 
         # Use .validated_data or empty dict → fixes type checker complaints
         filters = search_params_serializer.validated_data or {}
 
-        # ── Text / fuzzy search ────────────────────────────────────────
+        # ── Text / fuzzy search
         if q := filters.get("q"):
             queryset = queryset.filter(
                 Q(school_name__icontains=q)
@@ -627,15 +789,15 @@ class SchoolSearchView(generics.ListAPIView):
                 | Q(ward__icontains=q)
             )
 
-        # ── Exact / choice filters ─────────────────────────────────────
+        # ── Exact / choice filters
         if county := filters.get("county"):
             queryset = queryset.filter(county__iexact=county)
 
         if sub_county := filters.get("sub_county"):
             queryset = queryset.filter(sub_county__iexact=sub_county)
 
-        if school_type := filters.get("type"):
-            queryset = queryset.filter(type=school_type)
+        if school_type := filters.get("school_type"):
+            queryset = queryset.filter(school_type=school_type)
 
         if category := filters.get("school_category"):
             queryset = queryset.filter(school_category=category)
@@ -643,21 +805,21 @@ class SchoolSearchView(generics.ListAPIView):
         if status := filters.get("onboarding_status"):
             queryset = queryset.filter(onboarding_status=status)
 
-        # ── Boolean / existence filters ────────────────────────────────
+        # ── Boolean / existence filters
         if filters.get("is_active") is not None:
             queryset = queryset.filter(is_active=filters["is_active"])
 
         if (has_principal := filters.get("has_principal")) is not None:
             queryset = queryset.filter(principal__isnull=not has_principal)
 
-        # ── Numeric range filters ──────────────────────────────────────
+        # ── Numeric range filters
         if min_enroll := filters.get("min_enrollment"):
             queryset = queryset.filter(current_enrollment__gte=min_enroll)
 
         if max_enroll := filters.get("max_enrollment"):
             queryset = queryset.filter(current_enrollment__lte=max_enroll)
 
-        # ── Ordering ───────────────────────────────────────────────────
+        # ── Ordering
         ordering = filters.get("ordering", "-created_at")
         allowed_order_fields = {
             "school_name",
@@ -670,7 +832,12 @@ class SchoolSearchView(generics.ListAPIView):
             "-onboarding_progress",
         }
 
-        if ordering.lstrip("-") in {"school_name", "current_enrollment", "created_at", "onboarding_progress"}:
+        if ordering.lstrip("-") in {
+            "school_name",
+            "current_enrollment",
+            "created_at",
+            "onboarding_progress",
+        }:
             queryset = queryset.order_by(ordering)
         # else: keep default ordering (or raise 400 if you want strict validation)
 
@@ -694,85 +861,45 @@ class SchoolSearchView(generics.ListAPIView):
 
 
 #   REGIONAL ADMIN SCHOOL CREATION
+@extend_schema(
+    summary="Regional Admin creates a school in their county",
+    request=RegionalAdminCreateSchoolSerializer,
+    responses={
+        201: OpenApiResponse(description="School created", response=SchoolSerializer),
+        400: OpenApiResponse(description="Validation error"),
+        403: OpenApiResponse(description="Permission denied (wrong county)"),
+    },
+)
 class RegionalAdminCreateSchoolView(APIView):
-    """
-    Dedicated endpoint for Regional Admins to create schools in their counties.
-    Can optionally auto-create principal account.
-    """
     permission_classes = [permissions.IsAuthenticated, HasPermission]
     module = "schools"
-    required_action = "create"  
+    required_action = "create"
 
     def post(self, request):
         serializer = RegionalAdminCreateSchoolSerializer(
-            data=request.data,
-            context={'request': request}
+            data=request.data, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
+        # implement create() on the serializer (as in previous message) OR:
+        data = serializer.validated_data
+        name_parts = data.pop("principal_full_name").split()
+        principal_data = {
+            "first_name": name_parts[0],
+            "last_name": " ".join(name_parts[1:]) or name_parts[0],
+            "email": data.pop("principal_email"),
+        }
+        data.pop("auto_create_principal", None)
 
-        validated_data = serializer.validated_data
-
-        # Enforce county restriction again (serializer already checks, but double safety)
-        user = request.user
-        if not user.is_system_root:
-            allowed_counties = set(user.managed_counties.values_list('name', flat=True))
-            if validated_data['county'] not in allowed_counties:
-                return Response(
-                    {"county": "You can only create schools in your assigned counties"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-        try:
-            with transaction.atomic():
-                school_data = {
-                    k: v for k, v in validated_data.items()
-                    if k not in ['principal_email', 'principal_full_name', 'auto_create_principal']
-                }
-                school_data['created_by'] = request.user
-
-                # Basic onboarding defaults
-                school_data.setdefault('onboarding_status', School.OnboardingStatusChoices.PENDING)
-                school_data.setdefault('subscription_tier', 'FREE_TRIAL')
-
-                school = School.objects.create(**school_data)
-
-                if validated_data.get('auto_create_principal', True):
-                    # Minimal principal creation – extend as needed
-                    from accounts.models import CustomUser
-                    from accounts.services.user_creation_services import UserCreationService
-
-                    principal_data = {
-                        'first_name': validated_data['principal_full_name'].split()[0],
-                        'last_name': ' '.join(validated_data['principal_full_name'].split()[1:]) or '',
-                        'email': validated_data['principal_email'],
-                        'phone': school_data.get('phone', ''),  
-                        'user_type': 'PRN',
-                        # Add more fields if your UserCreationService requires them
-                    }
-
-                    result = UserCreationService.create_user(
-                        creator=request.user,
-                        school=school,
-                        user_type="PRN",
-                        user_data=principal_data
-                    )
-
-                    school.principal = result['user']
-                    school.first_principal = result['user']
-                    school.onboarding_status = School.OnboardingStatusChoices.PRINCIPAL_CREATED
-                    school.onboarding_progress = 30
-                    school.save(update_fields=['principal', 'first_principal', 'onboarding_status', 'onboarding_progress'])
-
-                return Response(
-                    {
-                        "message": "School created successfully",
-                        "school": SchoolSerializer(school).data
-                    },
-                    status=status.HTTP_201_CREATED
-                )
-
-        except Exception as e:
-            return Response(
-                {"error": f"School creation failed: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        school, principal = SchoolOnboardingService.create_school_with_principal(
+            school_data=data,
+            principal_data=principal_data,
+            creator=request.user,
+        )
+        return Response(
+            {
+                "message": "School created successfully",
+                "school": SchoolSerializer(school).data,
+                "principal_login_id": principal.login_id,
+            },
+            status=status.HTTP_201_CREATED,
+        )

@@ -1,104 +1,162 @@
-from django.db.models.signals import post_save, pre_save, post_delete
-from django.dispatch import receiver
-from django.utils import timezone
-from .models import AttendanceRecord, AttendancePattern
-from students.models import Student
 import logging
+
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
+
+from core.choices.attendance import AttendanceRecordStatusChoices
+from .models import AttendancePattern, AttendanceRecord
 
 logger = logging.getLogger(__name__)
 
 
-#  ATTENDANCE RECORD SIGNALS 
-@receiver(pre_save, sender=AttendanceRecord)
-def auto_set_status(sender, instance, **kwargs):
-    """Auto-set status based on check-in time"""
-    try:
-        if instance.check_in_time and instance.session:
-            # Check if late (after session start + 15 minutes grace)
-            session_start = timezone.make_aware(
-                timezone.datetime.combine(
-                    instance.session.date, 
-                    instance.session.start_time
-                )
-            )
-            grace_period = timezone.timedelta(minutes=15)
-            
-            if instance.check_in_time > session_start + grace_period:
-                instance.status = 'late'
-            elif instance.status in ['absent', 'excused', 'sick']:
-                # Keep existing status if already set
-                pass
-            else:
-                instance.status = 'present'
-                
-    except Exception as e:
-        logger.error(f"Error auto-setting status: {e}")
-
-
+# Session actual_count
+# Note: AttendanceRecord.save() already calls session.update_actual_count().
+# Keep these only if you want a safety net, or remove to avoid double work.
 @receiver(post_save, sender=AttendanceRecord)
-def notify_parent_if_absent(sender, instance, created, **kwargs):
-    """Notify parent if student is absent"""
+@receiver(post_delete, sender=AttendanceRecord)
+def refresh_session_actual_count(sender, instance: AttendanceRecord, **kwargs):
+    if instance.session_id:
+        try:
+            instance.session.update_actual_count()
+        except Exception as e:
+            logger.warning("Failed to refresh session count: %s", e)
+
+
+# Pattern updates
+@receiver(post_save, sender=AttendanceRecord)
+def update_student_attendance_pattern(
+    sender, instance: AttendanceRecord, created: bool, **kwargs
+):
+    """
+    Lightweight incremental update of AttendancePattern.
+    Prefer a periodic Celery job calling pattern.recalculate() for accuracy.
+    """
+    if not instance.session_id or not created:
+        # Only increment on new records (status edits need full recalculate)
+        return
+
     try:
-        if instance.status in ['absent', 'sick'] and not instance.parent_notified:
-            # Log notification (in real app, would send SMS/email)
-            logger.info(
-                f"Parent notification needed for {instance.student.admission_number} "
-                f"on {instance.session.date} - {instance.status}"
+        pattern, _ = AttendancePattern.objects.get_or_create(
+            student=instance.student,
+            academic_year=instance.session.academic_year,
+            term=instance.session.term,
+            defaults={
+                "total_sessions": 0,
+                "present_count": 0,
+                "late_count": 0,
+                "absent_count": 0,
+                "excused_count": 0,
+            },
+        )
+
+        status = instance.attendance_record_status
+        if status == AttendanceRecordStatusChoices.PRESENT:
+            pattern.present_count += 1
+        elif status == AttendanceRecordStatusChoices.LATE:
+            pattern.late_count += 1
+        elif status == AttendanceRecordStatusChoices.ABSENT:
+            pattern.absent_count += 1
+        elif status == AttendanceRecordStatusChoices.EXCUSED:
+            pattern.excused_count += 1
+        # sick / suspended can be counted as absent or tracked separately later
+
+        pattern.total_sessions += 1
+
+        if pattern.total_sessions > 0:
+            pattern.attendance_rate = (
+                (pattern.present_count + pattern.late_count)
+                / pattern.total_sessions
+                * 100
             )
-            
+            pattern.tardiness_rate = (
+                pattern.late_count / pattern.total_sessions * 100
+            )
+
+        pattern.save(
+            update_fields=[
+                "present_count",
+                "late_count",
+                "absent_count",
+                "excused_count",
+                "total_sessions",
+                "attendance_rate",
+                "tardiness_rate",
+                "last_updated",
+            ]
+        )
+
+        # Parent alert (log only for now — avoid recursive save)
+        if status in {
+            AttendanceRecordStatusChoices.ABSENT,
+            AttendanceRecordStatusChoices.SICK,
+        } and not instance.parent_notified:
+            logger.info(
+                "[Attendance Alert] Parent notification needed for %s (%s)",
+                instance.student.admission_number,
+                status,
+            )
+            AttendanceRecord.objects.filter(pk=instance.pk).update(
+                parent_notified=True
+            )
+
     except Exception as e:
-        logger.error(f"Error in parent notification: {e}")
+        logger.error(
+            "Failed to update attendance pattern for student %s: %s",
+            instance.student_id,
+            e,
+        )
 
 
 @receiver(post_delete, sender=AttendanceRecord)
-def cleanup_after_delete(sender, instance, **kwargs):
-    """Clean up after attendance record deletion"""
+def decrement_pattern_on_delete(sender, instance: AttendanceRecord, **kwargs):
+    if not instance.session_id:
+        return
+
     try:
-        # Update session count
-        if instance.session:
-            instance.session.save()
-            
+        pattern = AttendancePattern.objects.filter(
+            student=instance.student,
+            academic_year=instance.session.academic_year,
+            term=instance.session.term,
+        ).first()
+        if not pattern:
+            return
+
+        status = instance.attendance_record_status
+        if status == AttendanceRecordStatusChoices.PRESENT:
+            pattern.present_count = max(0, pattern.present_count - 1)
+        elif status == AttendanceRecordStatusChoices.LATE:
+            pattern.late_count = max(0, pattern.late_count - 1)
+        elif status == AttendanceRecordStatusChoices.ABSENT:
+            pattern.absent_count = max(0, pattern.absent_count - 1)
+        elif status == AttendanceRecordStatusChoices.EXCUSED:
+            pattern.excused_count = max(0, pattern.excused_count - 1)
+
+        pattern.total_sessions = max(0, pattern.total_sessions - 1)
+
+        if pattern.total_sessions > 0:
+            pattern.attendance_rate = (
+                (pattern.present_count + pattern.late_count)
+                / pattern.total_sessions
+                * 100
+            )
+            pattern.tardiness_rate = (
+                pattern.late_count / pattern.total_sessions * 100
+            )
+        else:
+            pattern.attendance_rate = 0
+            pattern.tardiness_rate = 0
+
+        pattern.save(
+            update_fields=[
+                "present_count",
+                "late_count",
+                "absent_count",
+                "excused_count",
+                "total_sessions",
+                "attendance_rate",
+                "tardiness_rate",
+                "last_updated",
+            ]
+        )
     except Exception as e:
-        logger.error(f"Error cleaning up after delete: {e}")
-
-
-#  ATTENDANCE PATTERN SIGNALS 
-@receiver(post_save, sender=AttendancePattern)
-def analyze_absent_pattern(sender, instance, created, **kwargs):
-    """Analyze and update absent patterns"""
-    try:
-        if created or kwargs.get('update_fields') is None:
-            instance.update_pattern_analysis()
-            
-    except Exception as e:
-        logger.error(f"Error analyzing absent pattern: {e}")
-
-
-#  STUDENT SIGNALS 
-@receiver(post_save, sender=Student)
-def create_attendance_pattern(sender, instance, created, **kwargs):
-    """Create attendance pattern for new student"""
-    try:
-        if created:
-            from schools.models import AcademicYear, Term
-            current_year = AcademicYear.objects.filter(is_current=True).first()
-            current_term = Term.objects.filter(is_current=True).first()
-            
-            if current_year and current_term:
-                AttendancePattern.objects.get_or_create(
-                    student=instance,
-                    academic_year=current_year,
-                    term=current_term,
-                    defaults={
-                        'total_sessions': 0,
-                        'present_count': 0,
-                        'late_count': 0,
-                        'absent_count': 0,
-                        'excused_count': 0,
-                        'attendance_rate': 0,
-                        'tardiness_rate': 0,
-                    }
-                )
-                
-    except Exception as e:
-        logger.error(f"Error creating attendance pattern: {e}")
+        logger.error("Failed to decrement attendance pattern: %s", e)

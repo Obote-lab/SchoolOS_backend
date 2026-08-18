@@ -1,55 +1,118 @@
-import uuid
-from django.db import models
+from decimal import Decimal
+
 from django.core.exceptions import ValidationError
-from django.core.validators import RegexValidator, MinValueValidator
+from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from accounts.models import CustomUser
+
+from core.choices.staff import (
+    EmploymentTypeChoices,
+    StaffAttendanceStatusChoices,
+    StaffTypeChoices,
+)
+from core.utils.phone import validate_kenyan_phone
 
 
 class StaffProfile(models.Model):
-    """Core staff profile — identity, role, school linkage"""
+    """
+    Extended profile for all staff members.
+    Linked 1-to-1 with CustomUser.
+    """
 
-    class StaffTypeChoices(models.TextChoices):
-        TEACHER = "teacher", _("Teacher")
-        PRINCIPAL = "principal", _("Principal")
-        DEPUTY_PRINCIPAL = "deputy_principal", _("Deputy Principal")
-        HOD = "hod", _("Head of Department")
-        ADMIN = "admin", _("Administrative Staff")
-        SUPPORT = "support", _("Support Staff (matron, nurse, security, etc.)")
+    user = models.OneToOneField(
+        "accounts.CustomUser",
+        on_delete=models.CASCADE,
+        related_name="staff_profile",
+        primary_key=True,
+        help_text=_("Link to the user account for this staff member"),
+    )
 
-    class EmploymentTypeChoices(models.TextChoices):
-        PERMANENT = "permanent", _("Permanent")
-        CONTRACT = "contract", _("Contract")
-        PROBATION = "probation", _("Probation")
+    school = models.ForeignKey(
+        "schools.School",
+        on_delete=models.CASCADE,
+        related_name="staff_members",
+        help_text=_("School this staff member belongs to"),
+    )
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.OneToOneField(CustomUser,on_delete=models.CASCADE,related_name="staff_profile",help_text=_("Linked user account"))
-    school = models.ForeignKey( "schools.School", on_delete=models.CASCADE,related_name="staff_members",help_text=_("School this staff member belongs to"))
-    # staff_id = models.CharField(max_length=50, unique_for_school=True, help_text="Unique staff ID within the school")
-    staff_id = models.CharField(max_length=50, help_text=_("Unique staff ID within the school"))
-    staff_type = models.CharField( max_length=20,choices=StaffTypeChoices.choices,default=StaffTypeChoices.TEACHER)
-    employment_type = models.CharField(max_length=20,choices=EmploymentTypeChoices.choices, default=EmploymentTypeChoices.PERMANENT)
-    tsc_number = models.CharField( max_length=50,blank=True,null=True,unique=True,help_text=_("TSC number (for teachers)"))
-    id_number = models.CharField(max_length=20,blank=True,null=True,unique=True,help_text=_("National ID number"))
-    phone_number = models.CharField(max_length=20,blank=True,validators=[RegexValidator(r"^\+?1?\d{9,15}$")])
-    date_employed = models.DateField(default=timezone.now)
-    job_title = models.CharField(max_length=200, blank=True)
-    department = models.ForeignKey("schools.Department",on_delete=models.SET_NULL, null=True, blank=True,related_name="staff_members")
-    # Teaching assignments (M2M)
-    subjects_taught = models.ManyToManyField("academics.Subject", blank=True, related_name="teachers", help_text=_("Subjects this teacher is assigned to"))
-    classes_assigned = models.ManyToManyField("schools.ClassRoom",blank=True, related_name="assigned_teachers",help_text=_("Classes this teacher teaches or supervises"))
+    # Identification
+    staff_id = models.CharField(
+        max_length=50,
+        help_text=_("Unique staff ID within the school"),
+    )
+    staff_type = models.CharField(
+        max_length=20,
+        choices=StaffTypeChoices.choices,
+        default=StaffTypeChoices.TEACHER,
+        help_text=_("Role of the staff member within the school"),
+    )
+    national_id = models.CharField(max_length=20, blank=True, null=True, unique=True)
+    tsc_number = models.CharField(max_length=20, blank=True, null=True, unique=True)
+    kra_pin = models.CharField(max_length=20, blank=True, null=True)
+    nssf_number = models.CharField(max_length=20, blank=True, null=True)
+    nhif_number = models.CharField(max_length=20, blank=True, null=True)
 
-    # Profile media
-    def profile_pic_upload_path(self, filename):
-        ext = filename.split('.')[-1]
-        return f"staff/profile_pics/{self.staff_id}.{ext}"
+    # Employment
+    employment_type = models.CharField(
+        max_length=20,
+        choices=EmploymentTypeChoices.choices,
+        default=EmploymentTypeChoices.PERMANENT,
+    )
+    job_title = models.CharField(max_length=100)
+    department = models.ForeignKey(
+        "schools.Department",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_members",
+    )
+    date_employed = models.DateField(null=True, blank=True)
+    employment_terms = models.TextField(blank=True)
 
-    profile_pic = models.ImageField(upload_to=profile_pic_upload_path,null=True,blank=True,help_text=_("Staff profile picture"))
-    # Employment status
+    # Academic / Teaching
+    qualifications = models.JSONField(default=dict, blank=True)
+    subjects_specialized = models.JSONField(default=list, blank=True)
+    teaching_experience = models.PositiveIntegerField(default=0)
+
+    # Financial & HR
+    bank_details = models.JSONField(default=dict, blank=True)
+    basic_salary = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    allowances = models.JSONField(default=dict, blank=True)
+    deductions = models.JSONField(default=dict, blank=True)
+    net_salary = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+
+    last_promotion = models.DateField(null=True, blank=True)
+    next_review = models.DateField(null=True, blank=True)
+
+    # Emergency & Medical
+    emergency_contact_name = models.CharField(max_length=100, blank=True)
+    emergency_contact_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        validators=[validate_kenyan_phone],
+    )
+    medical_conditions = models.TextField(blank=True)
+    allergies = models.TextField(blank=True)
+
+    # Performance (cached)
+    performance_score = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    attendance_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+
+    # Media & Status
+    signature = models.ImageField(
+        upload_to="staff/signatures/", blank=True, null=True
+    )
     is_active = models.BooleanField(default=True)
     exit_date = models.DateField(null=True, blank=True)
     exit_reason = models.TextField(blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -57,85 +120,83 @@ class StaffProfile(models.Model):
         verbose_name = _("Staff Profile")
         verbose_name_plural = _("Staff Profiles")
         ordering = ["staff_id"]
-        unique_together = [["school", "staff_id"]]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["school", "staff_id"],
+                name="unique_staff_id_per_school",
+            )
+        ]
         indexes = [
-            models.Index(fields=["staff_id"]),
-            models.Index(fields=["school", "staff_type"]),
+            models.Index(fields=["staff_type"]),
             models.Index(fields=["is_active"]),
-            models.Index(fields=["tsc_number"]),
-            models.Index(fields=["date_employed"]),
+            models.Index(fields=["department"]),
+            models.Index(fields=["school", "is_active"]),
         ]
 
     def __str__(self):
-        return f"{self.staff_id} - {self.user.get_full_name()} ({self.get_staff_type_display()})"
+        return f"{self.staff_id} – {self.user.get_full_name()}"
 
     def clean(self):
         super().clean()
-
         if self.date_employed and self.date_employed > timezone.now().date():
-            raise ValidationError({"date_employed": _("Cannot be in the future")})
+            raise ValidationError(
+                {"date_employed": _("Employment date cannot be in the future.")}
+            )
 
-        if self.exit_date and self.exit_date > timezone.now().date():
-            raise ValidationError({"exit_date": _("Cannot be in the future")})
-
-        if self.exit_date and self.date_employed and self.exit_date < self.date_employed:
-            raise ValidationError({"exit_date": _("Cannot be before employment date")})
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     @property
     def full_name(self):
         return self.user.get_full_name()
 
     @property
-    def age(self):
-        if not self.user.date_of_birth:
-            return None
-        today = timezone.now().date()
-        return today.year - self.user.date_of_birth.year - (
-            (today.month, today.day) < (self.user.date_of_birth.month, self.user.date_of_birth.day)
-        )
+    def is_teacher(self) -> bool:
+        """Return True if this staff member has a teaching role."""
+        return self.staff_type in {
+            StaffTypeChoices.TEACHER,
+            StaffTypeChoices.HOD,
+            StaffTypeChoices.PRINCIPAL,
+            StaffTypeChoices.DEPUTY,
+        }
 
-    @property
-    def years_of_service(self):
-        if not self.date_employed:
-            return None
-        end = self.exit_date or timezone.now().date()
-        return end.year - self.date_employed.year - ((end.month, end.day) < (self.date_employed.month, self.date_employed.day))
-
-    def deactivate(self, exit_date=None, reason=""):
+    def deactivate(self, exit_date=None, reason: str = ""):
         self.is_active = False
-        self.exit_date = exit_date or timezone.now().date()
-        self.exit_reason = reason
-        self.save(update_fields=["is_active", "exit_date", "exit_reason"])
-        self.user.is_active = False
-        self.user.save(update_fields=["is_active"])
+        if exit_date:
+            self.exit_date = exit_date
+        if reason:
+            self.exit_reason = reason
+        self.save(update_fields=["is_active", "exit_date", "exit_reason", "updated_at"])
 
     def activate(self):
         self.is_active = True
         self.exit_date = None
         self.exit_reason = ""
-        self.save(update_fields=["is_active", "exit_date", "exit_reason"])
-        self.user.is_active = True
-        self.user.save(update_fields=["is_active"])
+        self.save(update_fields=["is_active", "exit_date", "exit_reason", "updated_at"])
 
 
 class StaffAttendance(models.Model):
-    """Simplified daily staff attendance tracking"""
+    """Daily attendance record for a staff member."""
 
-    class StatusChoices(models.TextChoices):
-        PRESENT = "present", _("Present")
-        ABSENT = "absent", _("Absent")
-        LATE = "late", _("Late")
-        LEAVE = "leave", _("On Leave")
-
-    staff = models.ForeignKey(StaffProfile, on_delete=models.CASCADE,related_name="attendance_records")
+    staff = models.ForeignKey(
+        StaffProfile,
+        on_delete=models.CASCADE,
+        related_name="attendance_records",
+    )
     date = models.DateField(default=timezone.now)
-    status = models.CharField( max_length=20, choices=StatusChoices.choices, default=StatusChoices.PRESENT)
+    status = models.CharField(
+        max_length=20,
+        choices=StaffAttendanceStatusChoices.choices,
+        default=StaffAttendanceStatusChoices.PRESENT,
+    )
     notes = models.TextField(blank=True)
-    recorded_by = models.ForeignKey(CustomUser,on_delete=models.SET_NULL,null=True,related_name="recorded_attendance",help_text=_("User who recorded this attendance"))
+    recorded_by = models.ForeignKey(
+        "accounts.CustomUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recorded_staff_attendance",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -145,13 +206,8 @@ class StaffAttendance(models.Model):
         ordering = ["-date"]
         indexes = [
             models.Index(fields=["staff", "date"]),
-            models.Index(fields=["status"]),
+            models.Index(fields=["date", "status"]),
         ]
 
     def __str__(self):
-        return f"{self.staff.staff_id} - {self.date} ({self.get_status_display()})"
-
-    def clean(self):
-        super().clean()
-        if self.date > timezone.now().date():
-            raise ValidationError({"date": _("Cannot be in the future")})
+        return f"{self.staff.staff_id} – {self.date} ({self.get_status_display()})"

@@ -1,114 +1,93 @@
+import logging
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
-from .models import DisciplineIncident, SickBayRecord, CounselingSession, WellnessCheck
-import logging
+from datetime import timedelta
+from .models import CounselingSession, DisciplineIncident, SickBayRecord, WellnessCheck
+from core.choices.common import StressLevelChoices
 
 logger = logging.getLogger(__name__)
 
 
-#  DISCIPLINE INCIDENT SIGNALS 
+#  DISCIPLINE INCIDENT
 @receiver(pre_save, sender=DisciplineIncident)
-def auto_set_incident_status(sender, instance, **kwargs):
-    """Auto-set incident status and dates"""
-    try: 
-        # Auto-set date_reported if not provided
-        if not instance.date_reported:
-            instance.date_reported = timezone.now()
-            
-    except Exception as e:
-        logger.error(f"Error setting incident status: {e}")
+def auto_set_incident_defaults(sender, instance, **kwargs):
+    """Set default dates and basic fields before save"""
+    if not instance.date_reported:
+        instance.date_reported = timezone.now()
 
 
 @receiver(post_save, sender=DisciplineIncident)
-def check_for_recurring_pattern(sender, instance, created, **kwargs):
-    """Check if student has recurring discipline pattern"""
+def check_recurring_pattern(sender, instance, created, **kwargs):
+    """Light check for recurring incidents"""
+    if not created:
+        return
+
     try:
-        if created:
-            # Get student's past incidents
-            past_incidents = DisciplineIncident.objects.filter(
-                student=instance.student,
-                discipline_category=instance.discipline_category,
-            ).exclude(id=instance.id)
-            
-            if past_incidents.count() >= 2:
-                DisciplineIncident.objects.filter(id=instance.id).update(
-                    recurring_pattern=True)
-                logger.info(f"Recurring pattern detected for {instance.student.admission_number}")
-                
+        # Quick check for previous similar incidents
+        past_count = DisciplineIncident.objects.filter(
+            student=instance.student,
+            discipline_category=instance.discipline_category,
+        ).exclude(id=instance.id).count()
+
+        if past_count >= 2:
+            DisciplineIncident.objects.filter(id=instance.id).update(
+                recurring_pattern=True
+            )
+            logger.info(f"Recurring discipline pattern detected for {instance.student.admission_number}")
     except Exception as e:
-        logger.error(f"Error checking recurring pattern: {e}")
+        logger.error(f"Recurring pattern check failed: {e}")
 
 
-#  SICK BAY RECORD SIGNALS 
+# SICK BAY
 @receiver(pre_save, sender=SickBayRecord)
-def validate_medical_data(sender, instance, **kwargs):
-    """Validate sick bay record data"""
-    try:
-        # Auto-set isolation end date if required
-        if instance.isolation_required and not instance.isolation_end_date:
-            instance.isolation_end_date = instance.date.date() + timezone.timedelta(days=3)
-            
-        # Auto-notify parent for serious cases
-        if instance.referred_to_hospital or instance.isolation_required:
-            instance.parent_notified = True
-            
-    except Exception as e:
-        logger.error(f"Error validating medical data: {e}")
+def set_medical_defaults(sender, instance, **kwargs):
+    """Set automatic fields for medical records"""
+    if instance.isolation_required and not instance.isolation_end_date:
+        instance.isolation_end_date = instance.date.date() + timedelta(days=3)
+
+    # Auto notify parent for serious cases
+    if instance.referred_to_hospital or instance.isolation_required:
+        instance.parent_notified = True
 
 
 @receiver(post_save, sender=SickBayRecord)
-def update_student_health_status(sender, instance, created, **kwargs):
-    """Update student's health status"""
-    try:
-        if created and instance.is_contagious:
-            # Log contagious case
-            logger.warning(f"Contagious case: {instance.student.admission_number} - {instance.complaint}")
-            
-            # TODO: In real app, would notify relevant staff
-            
-    except Exception as e:
-        logger.error(f"Error updating health status: {e}")
+def log_contagious_case(sender, instance, created, **kwargs):
+    """Log contagious cases for quick attention"""
+    if created and instance.is_contagious:
+        logger.warning(
+            f"CONTAGIOUS CASE: {instance.student.admission_number} - {instance.complaint}"
+        )
 
 
-#  COUNSELING SESSION SIGNALS 
+# COUNSELING
 @receiver(pre_save, sender=CounselingSession)
-def validate_counseling_session(sender, instance, **kwargs):
-    """Validate counseling session"""
-    try:
-        # Auto-set follow-up date if required
-        if instance.follow_up_required and not instance.follow_up_date:
-            instance.follow_up_date = instance.date.date() + timezone.timedelta(days=14)
-    except Exception as e:
-        logger.error(f"Error validating counseling session: {e}")
+def set_counseling_defaults(sender, instance, **kwargs):
+    """Auto-set follow-up date if needed"""
+    if instance.follow_up_required and not instance.follow_up_date:
+        instance.follow_up_date = instance.date.date() + timedelta(days=14)
 
 
-#  WELLNESS CHECK SIGNALS 
+#  WELLNESS
 @receiver(pre_save, sender=WellnessCheck)
-def calculate_wellness_scores(sender, instance, **kwargs):
-    """Calculate wellness scores"""
-    try:
-        # Auto-set next check date
-        if instance.follow_up_planned and not instance.next_check_date:
-            instance.next_check_date = instance.check_date + timezone.timedelta(days=30)
-            
-    except Exception as e:
-        logger.error(f"Error calculating wellness scores: {e}")
+def set_wellness_defaults(sender, instance, **kwargs):
+    """Auto-set next check date"""
+    if instance.follow_up_planned and not instance.next_check_date:
+        instance.next_check_date = instance.check_date + timedelta(days=30)
 
 
 @receiver(post_save, sender=WellnessCheck)
 def flag_critical_wellness(sender, instance, created, **kwargs):
-    """Flag critical wellness issues"""
+    """Flag critical cases"""
+    if not created:
+        return
+
     try:
-        if created:
-            # Check for critical stress levels
-            if instance.academic_stress_level == 'critical':
-                logger.warning(f"Critical stress level: {instance.student.admission_number}")
-                
-            # Check for low wellness scores
-            overall = instance.calculate_overall_score()
-            if overall and overall < 4:
-                logger.warning(f"Low wellness score: {instance.student.admission_number} - {overall}")
-                
+        if instance.academic_stress_level == StressLevelChoices.CRITICAL:
+            logger.warning(f"CRITICAL STRESS: {instance.student.admission_number}")
+
+        overall = instance.calculate_overall_score()
+        if overall and overall < 4:
+            logger.warning(f"LOW WELLNESS SCORE: {instance.student.admission_number} ({overall})")
     except Exception as e:
-        logger.error(f"Error flagging critical wellness: {e}")
+        logger.error(f"Wellness flagging failed: {e}")

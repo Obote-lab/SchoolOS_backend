@@ -1,10 +1,18 @@
-from django.db.models.signals import pre_save, post_save
-from django.dispatch import receiver
-from django.utils import timezone
-from .models import Notification, Feedback, Announcement, ParentTeacherMeeting
 from django.contrib.auth import get_user_model
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
+from accounts.models import AuditLog
+from core.choices.communications import (
+    AnnouncementStatusChoices,
+    FeedbackPriorityChoices,
+    FeedbackStatusChoices,
+    NotificationCategoryChoices,
+    NotificationPriorityChoices,
+)
+from .models import Announcement, Feedback, Notification, ParentTeacherMeeting
 
 User = get_user_model()
+
 
 # FEEDBACK SIGNALS
 @receiver(pre_save, sender=Feedback)
@@ -18,6 +26,7 @@ def feedback_pre_save(sender, instance, **kwargs):
         except Feedback.DoesNotExist:
             instance._old = None
 
+
 @receiver(post_save, sender=Feedback)
 def feedback_post_save(sender, instance, created, **kwargs):
     """
@@ -29,26 +38,26 @@ def feedback_post_save(sender, instance, created, **kwargs):
             Notification.objects.create(
                 user=instance.assigned_to,
                 sender=instance.submitted_by,
-                notification_category=Notification.SYSTEM,
+                notification_category=NotificationCategoryChoices.SYSTEM,
                 priority=(
-                    Notification.HIGH
-                    if instance.priority in [Feedback.HIGH, Feedback.URGENT]
-                    else Notification.NORMAL
+                    NotificationPriorityChoices.HIGH
+                    if instance.priority in [FeedbackPriorityChoices.HIGH, FeedbackPriorityChoices.URGENT]
+                    else NotificationPriorityChoices.NORMAL
                 ),
                 title=f"New Feedback Assigned",
                 message=f"You have been assigned feedback: {instance.title}",
-                action_url=f"/feedback/{instance.id}/"
+                action_url=f"/feedback/{instance.id}/",
             )
     #  Feedback resolved
-    if instance.feedback_status == Feedback.RESOLVED and instance.resolved_by:
+    if instance.feedback_status == FeedbackStatusChoices.RESOLVED and instance.resolved_by:
         Notification.objects.create(
             user=instance.submitted_by,
             sender=instance.resolved_by,
-            notification_category=Notification.SYSTEM,
-            priority=Notification.NORMAL,
+            notification_category=NotificationCategoryChoices.SYSTEM,
+            priority=NotificationPriorityChoices.NORMAL,
             title="Feedback Resolved",
             message=f"Your feedback '{instance.title}' has been resolved.",
-            action_url=f"/feedback/{instance.id}/"
+            action_url=f"/feedback/{instance.id}/",
         )
 
 
@@ -67,17 +76,21 @@ def announcement_post_save(sender, instance, created, **kwargs):
     """
     Notify ONLY when status transitions to PUBLISHED
     """
-    if instance.announcement_status == Announcement.PUBLISHED:
-        if created or (instance._old and instance._old.announcement_status != Announcement.PUBLISHED):
+    if instance.announcement_status == AnnouncementStatusChoices.PUBLISHED:
+        if created or (
+            instance._old
+            and instance._old.announcement_status != AnnouncementStatusChoices.PUBLISHED
+        ):
             Notification.objects.create(
                 user=instance.created_by,
                 sender=instance.created_by,
-                notification_category=Notification.EVENT,
+                notification_category=NotificationCategoryChoices.EVENT,
                 priority=instance.priority,
                 title="Announcement Published",
                 message=f"Your announcement '{instance.title}' is now live.",
-                action_url=f"/announcements/{instance.id}/"
+                action_url=f"/announcements/{instance.id}/",
             )
+
 
 # MEETING SIGNALS
 @receiver(post_save, sender=ParentTeacherMeeting)
@@ -94,11 +107,29 @@ def send_meeting_invites(sender, instance, created, **kwargs):
             Notification.objects.create(
                 user=user,
                 sender=instance.organizer,
-                notification_category=Notification.EVENT,
-                priority=Notification.NORMAL,
+                notification_category=NotificationCategoryChoices.EVENT,
+                priority=NotificationPriorityChoices.NORMAL,
                 title="Meeting Invitation",
                 message=f"You are invited to '{instance.title}' on {instance.date}.",
-                action_url=f"/meetings/{instance.id}/"
+                action_url=f"/meetings/{instance.id}/",
             )
         except User.DoesNotExist:
             continue
+
+
+@receiver(post_save, sender=Feedback)
+def log_feedback_resolution(sender, instance, created, **kwargs):
+    if not created and instance.feedback_status == FeedbackStatusChoices.RESOLVED:
+        AuditLog.objects.create(
+            user=instance.resolved_by,
+            action_type="UPDATE",
+            model_name="Feedback",
+            record_id=instance.id,
+            new_value=f"Resolved: {instance.title}",
+            reason="Feedback resolution recorded",
+            school_id=(
+                instance.related_to_student.school_id
+                if instance.related_to_student
+                else None
+            ),
+        )

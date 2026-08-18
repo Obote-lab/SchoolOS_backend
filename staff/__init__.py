@@ -1,1 +1,1 @@
-default_app_config = 'staff.apps.StaffConfig'
+default_app_config = "staff.apps.StaffConfig"

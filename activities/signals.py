@@ -1,8 +1,11 @@
 import json
-from django.db.models.signals import post_save, pre_save, pre_delete
-from django.dispatch import receiver
+
 from django.core.exceptions import ValidationError
-from .models import Activity, StudentActivity, Competition
+from django.db.models.signals import post_save, pre_delete, pre_save
+from django.dispatch import receiver
+from core.choices.activities import StudentActivityStatusChoices
+from .models import Activity, Competition, StudentActivity
+
 
 @receiver(pre_save, sender=Activity)
 def validate_activity_data(sender, instance, **kwargs):
@@ -19,7 +22,9 @@ def validate_activity_data(sender, instance, **kwargs):
             instance.achievements = json.loads(instance.achievements)
         except json.JSONDecodeError:
             raise ValidationError("Achievements must be a valid JSON list.")
-    if instance.performance_metrics and not isinstance(instance.performance_metrics, dict):
+    if instance.performance_metrics and not isinstance(
+        instance.performance_metrics, dict
+    ):
         try:
             instance.performance_metrics = json.loads(instance.performance_metrics)
         except json.JSONDecodeError:
@@ -32,8 +37,8 @@ def validate_student_activity(sender, instance, **kwargs):
     if instance.student.school != instance.activity.school:
         raise ValidationError(
             f"Student {instance.student.admission_number} belongs to "
-            f"{instance.student.school.name}, but activity {instance.activity.name} "
-            f"belongs to {instance.activity.school.name}."
+            f"{instance.student.school.school_name}, but activity {instance.activity.name} "
+            f"belongs to {instance.activity.school.school_name}."
         )
     if instance._state.adding:
         if instance.activity.current_participants >= instance.activity.max_participants:
@@ -43,26 +48,34 @@ def validate_student_activity(sender, instance, **kwargs):
             )
     if instance.end_date and instance.end_date < instance.start_date:
         raise ValidationError("End date must be after start date.")
-    if instance.talent_score and (instance.talent_score < 0 or instance.talent_score > 100):
+    if instance.talent_score and (
+        instance.talent_score < 0 or instance.talent_score > 100
+    ):
         raise ValidationError("Talent score must be between 0 and 100.")
-    if instance.attendance_rate and (instance.attendance_rate < 0 or instance.attendance_rate > 100):
+    if instance.attendance_rate and (
+        instance.attendance_rate < 0 or instance.attendance_rate > 100
+    ):
         raise ValidationError("Attendance rate must be between 0 and 100.")
 
 
 @receiver(post_save, sender=StudentActivity)
 def update_activity_participant_count(sender, instance, created, **kwargs):
-    """Update the activity's participant count when student activity changes."""
-    
+    """Update the activity's participant count"""
     if instance.activity:
-        from .models import StudentActivity
-        count = StudentActivity.objects.filter(
-            activity=instance.activity,
-            student_status='Active'
-        ).count()
-        Activity.objects.filter(pk=instance.activity.pk).update(
-            current_participants=count
-        )
+        count = StudentActivity.objects.filter(activity=instance.activity,student_activity_status=StudentActivityStatusChoices.ACTIVE,).count()
+        Activity.objects.filter(pk=instance.activity.pk).update(current_participants=count)
 
+@receiver(pre_delete, sender=StudentActivity)
+def decrement_activity_participant_count(sender, instance, **kwargs):
+    if not instance.activity_id:
+        return
+    count = StudentActivity.objects.filter(
+        activity_id=instance.activity_id,
+        student_activity_status=StudentActivityStatusChoices.ACTIVE,
+    ).exclude(pk=instance.pk).count()
+    Activity.objects.filter(pk=instance.activity_id).update(
+        current_participants=count
+    )
 
 @receiver(pre_save, sender=Competition)
 def validate_competition_data(sender, instance, **kwargs):
@@ -97,18 +110,18 @@ def validate_competition_data(sender, instance, **kwargs):
 @receiver(post_save, sender=Competition)
 def log_competition_to_activity(sender, instance, created, **kwargs):
     """Log competition to activity's achievements if it has awards."""
-    
-    if created and instance.results and 'awards' in instance.results:
+
+    if created and instance.results and "awards" in instance.results:
         activity = instance.activity
         if activity.achievements is None:
             activity.achievements = []
         achievement = {
-            'competition': instance.name,
-            'level': instance.level,
-            'date': instance.date.isoformat(),
-            'awards': instance.results.get('awards', [])
+            "competition": instance.name,
+            "competition_level": instance.competition_level,
+            "date": instance.date.isoformat(),
+            "awards": instance.results.get("awards", []),
         }
-        
+
         if achievement not in activity.achievements:
             activity.achievements.append(achievement)
             # Save without triggering signals

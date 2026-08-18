@@ -1,106 +1,128 @@
 import logging
+
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiTypes,
+    extend_schema,
+    extend_schema_view,
+)
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.api.permissions import HasPermission  
-from ..models import ParentGuardian, Student, StudentMedicalHistory
+from accounts.api.permissions import HasPermission
+
+from ..models import ParentGuardian, StudentMedicalHistory, StudentProfile
 from .serializers import (
     MedicalHistoryCreateSerializer,
     ParentGuardianCreateSerializer,
     ParentGuardianSerializer,
     ParentGuardianSimpleSerializer,
     StudentCreateSerializer,
+    StudentMedicalHistorySerializer,
+    StudentSearchSerializer,
     StudentSerializer,
     StudentSimpleSerializer,
     StudentStatusUpdateSerializer,
     StudentUpdateSerializer,
-    StudentSearchSerializer,
-    StudentMedicalHistorySerializer,
 )
 
 logger = logging.getLogger(__name__)
 
 
-#   Permissions (reused across viewsets)
-class IsSchoolStaffOrPrincipal(IsAuthenticated, HasPermission):
-    required_action = "manage_students"
+#  PERMISSIONS
+class IsSchoolStaffOrPrincipal(IsAuthenticated):
+    """
+    Allows school staff (teachers, HODs, deputies, principal)
+    or superusers to manage students.
+    """
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+
+        # Check if user has any active school-level role
+        return request.user.user_roles.filter(
+            is_active=True,
+            role__access_level="school",
+        ).exists()
 
 
 class IsParentOfStudent(IsAuthenticated):
     def has_object_permission(self, request, view, obj):
-        if isinstance(obj, Student):
-            return ParentGuardian.objects.filter(user=request.user, student=obj).exists()
+        user = request.user
+        if isinstance(obj, StudentProfile):
+            return ParentGuardian.objects.filter(user=user, students=obj).exists()
         if hasattr(obj, "student"):
-            return ParentGuardian.objects.filter(user=request.user, student=obj.student).exists()
+            return ParentGuardian.objects.filter(user=user, students=obj.student).exists()
         return False
 
 
 class IsStudentOwner(IsAuthenticated):
     def has_object_permission(self, request, view, obj):
-        return obj.user == request.user
+        return getattr(obj, "user", None) == request.user
 
 
-
-#   Student ViewSet
+# STUDENT VIEWSET
 @extend_schema_view(
     list=extend_schema(
         summary="List students",
-        description="Paginated list of students (filtered by school/class/status for staff)",
         parameters=[
-            OpenApiParameter(name="school", type=OpenApiTypes.UUID, description="School ID filter"),
-            OpenApiParameter(name="current_class", type=OpenApiTypes.UUID, description="Class ID filter"),
-            OpenApiParameter(name="student_status", type=OpenApiTypes.STR, description="Status filter"),
-            OpenApiParameter(name="student_category", type=OpenApiTypes.STR, description="Category filter"),
-            OpenApiParameter(name="search", type=OpenApiTypes.STR, description="Search by name/admission"),
-        ]
+            OpenApiParameter(name="school", type=OpenApiTypes.UUID),
+            OpenApiParameter(name="current_class", type=OpenApiTypes.UUID),
+            OpenApiParameter(name="student_status", type=OpenApiTypes.STR),
+            OpenApiParameter(name="student_category", type=OpenApiTypes.STR),
+        ],
     ),
-    retrieve=extend_schema(summary="Get student detail", description="Full student profile including parents"),
-    create=extend_schema(summary="Create student", description="Create student + linked user account"),
-    update=extend_schema(summary="Update student", description="Update student details"),
+    retrieve=extend_schema(summary="Get full student profile"),
+    create=extend_schema(summary="Create new student + user account"),
 )
-@extend_schema(tags=["Students"])
 class StudentViewSet(viewsets.ModelViewSet):
-    queryset = Student.objects.select_related(
-        "user", "school", "current_class", "boarding_house",
-        "current_academic_year", "current_term"
-    ).prefetch_related("guardians__user")
-    permission_classes = [IsAuthenticated]
+    queryset = StudentProfile.objects.select_related("user", "school", "current_class", "boarding_house").prefetch_related("parents__user")
+    module = "students"
+    permission_classes = [IsAuthenticated, HasPermission]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ["school", "current_class", "student_status", "student_category", "gender"]
     search_fields = ["admission_number", "user__first_name", "user__last_name", "user__phone"]
-    ordering_fields = ["admission_number", "date_of_birth", "admission_date", "student_status"]
+    ordering_fields = ["admission_number", "admission_date", "date_of_birth"]
     ordering = ["admission_number"]
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
-            return [IsAuthenticated()]  # + read-only for parents/students
-        if self.action in ["create", "update", "partial_update", "destroy", "update_status"]:
-            return [IsSchoolStaffOrPrincipal()]
+            self.required_action = "read"
+        elif self.action == "create":
+            self.required_action = "create"
+        elif self.action in ["update", "partial_update", "update_status"]:
+            self.required_action = "update"
+        elif self.action == "destroy":
+            self.required_action = "delete"
+        else:
+            self.required_action = "read"
         return super().get_permissions()
 
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
 
-        # Students see only themselves
+        # Student sees only themselves
         if hasattr(user, "student_profile"):
             return qs.filter(user=user)
 
-        # Parents see only their children
+        # Parent sees only their children
         if ParentGuardian.objects.filter(user=user).exists():
-            student_ids = ParentGuardian.objects.filter(user=user).values_list("student_id", flat=True)
+            student_ids = ParentGuardian.objects.filter(user=user).values_list("students__id", flat=True)
             return qs.filter(id__in=student_ids)
 
-        # Staff / Principal see only their school
-        if user.school:
-            return qs.filter(school=user.school)
+        # Staff sees only their school
+        school = getattr(self.request, "school", None) or user.school
+        if school:
+            return qs.filter(school=school)
 
         return qs.none()
 
@@ -113,11 +135,6 @@ class StudentViewSet(viewsets.ModelViewSet):
             return StudentSimpleSerializer
         return StudentSerializer
 
-    @extend_schema(
-        summary="Update student status",
-        request=StudentStatusUpdateSerializer,
-        responses={200: StudentSerializer}
-    )
     @action(detail=True, methods=["post"], url_path="status")
     def update_status(self, request, pk=None):
         student = self.get_object()
@@ -126,78 +143,41 @@ class StudentViewSet(viewsets.ModelViewSet):
         )
         serializer.is_valid(raise_exception=True)
 
-        try:
-            student.update_status(
-                serializer.validated_data["student_status"],
-                serializer.validated_data.get("reason", "")
-            )
-            if "exit_date" in serializer.validated_data:
-                student.exit_date = serializer.validated_data["exit_date"]
-                student.save(update_fields=["exit_date"])
+        data = serializer.validated_data
+        student.student_status = data["student_status"]
+        student.status_reason = data.get("reason", "")
+        if "exit_date" in data:
+            student.exit_date = data["exit_date"]
 
-            return Response(StudentSerializer(student).data)
-        except Exception as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-    @extend_schema(
-        summary="Search students",
-        request=StudentSearchSerializer,
-        responses={200: StudentSimpleSerializer(many=True)}
-    )
-    @action(detail=False, methods=["get"], url_path="search")
-    def search(self, request):
-        serializer = StudentSearchSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-        filters = serializer.validated_data
-
-        qs = self.get_queryset()
-
-        if q := filters.get("q"):
-            qs = qs.filter(
-                Q(admission_number__icontains=q) |
-                Q(user__first_name__icontains=q) |
-                Q(user__last_name__icontains=q) |
-                Q(user__phone__icontains=q)
-            )
-
-        if filters.get("school"):
-            qs = qs.filter(school_id=filters["school"])
-        if filters.get("current_class"):
-            qs = qs.filter(current_class_id=filters["current_class"])
-        if filters.get("student_status"):
-            qs = qs.filter(student_status=filters["student_status"])
-        if filters.get("student_category"):
-            qs = qs.filter(student_category=filters["student_category"])
-        if filters.get("gender"):
-            qs = qs.filter(gender=filters["gender"])
-
-        serializer = StudentSimpleSerializer(qs, many=True)
-        return Response(serializer.data)
+        student.save(update_fields=["student_status", "status_reason", "exit_date", "updated_at"])
+        return Response(StudentSerializer(student).data)
 
 
 
-#   ParentGuardian ViewSet
+# PARENT GUARDIAN VIEWSET
 @extend_schema_view(
     list=extend_schema(summary="List parents/guardians"),
-    retrieve=extend_schema(summary="Get parent/guardian detail"),
-    create=extend_schema(summary="Create parent/guardian + user account"),
+    create=extend_schema(summary="Create parent + user account"),
 )
-@extend_schema(tags=["Parents/Guardians"])
 class ParentGuardianViewSet(viewsets.ModelViewSet):
-    queryset = ParentGuardian.objects.select_related("user", "student__user", "student__school")
+    queryset = ParentGuardian.objects.select_related("user").prefetch_related("students")
     permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ["student", "relationship", "is_primary"]
-    search_fields = ["user__first_name", "user__last_name", "user__phone", "student__admission_number"]
+    filterset_fields = ["relationship", "is_primary"]
+    search_fields = ["user__first_name", "user__last_name", "user__phone"]
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
-            return [IsAuthenticated()]
-        if self.action == "create":
-            return [IsSchoolStaffOrPrincipal()]
-        if self.action in ["update", "partial_update", "destroy"]:
-            return [IsSchoolStaffOrPrincipal()]
+            self.required_action = "read"
+        elif self.action == "create":
+            self.required_action = "create"
+        elif self.action in ["update", "partial_update", "update_status"]:
+            self.required_action = "update"
+        elif self.action == "destroy":
+            self.required_action = "delete"
+        else:
+            self.required_action = "read"
         return super().get_permissions()
 
     def get_queryset(self):
@@ -208,7 +188,7 @@ class ParentGuardianViewSet(viewsets.ModelViewSet):
             return qs.filter(user=user)
 
         if user.school:
-            return qs.filter(student__school=user.school)
+            return qs.filter(students__school=user.school)
 
         return qs.none()
 
@@ -218,14 +198,11 @@ class ParentGuardianViewSet(viewsets.ModelViewSet):
         return ParentGuardianSerializer
 
 
-
-#   StudentMedicalHistory ViewSet
+#  MEDICAL HISTORY VIEWSET
 @extend_schema_view(
     list=extend_schema(summary="List medical records"),
-    retrieve=extend_schema(summary="Get medical record detail"),
     create=extend_schema(summary="Add medical record"),
 )
-@extend_schema(tags=["Medical History"])
 class StudentMedicalHistoryViewSet(viewsets.ModelViewSet):
     queryset = StudentMedicalHistory.objects.select_related(
         "student__user", "student__school", "logged_by"
@@ -239,10 +216,16 @@ class StudentMedicalHistoryViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
-            return [IsAuthenticated()]  # staff + parents of student
-        if self.action == "create":
-            return [IsSchoolStaffOrPrincipal()]
-        return [IsSchoolStaffOrPrincipal()]
+            self.required_action = "read"
+        elif self.action == "create":
+            self.required_action = "create"
+        elif self.action in ["update", "partial_update", "update_status"]:
+            self.required_action = "update"
+        elif self.action == "destroy":
+            self.required_action = "delete"
+        else:
+            self.required_action = "read"
+        return super().get_permissions()
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -250,10 +233,9 @@ class StudentMedicalHistoryViewSet(viewsets.ModelViewSet):
 
         # Parents see only their children's records
         if ParentGuardian.objects.filter(user=user).exists():
-            student_ids = ParentGuardian.objects.filter(user=user).values_list("student_id", flat=True)
+            student_ids = ParentGuardian.objects.filter(user=user).values_list("students__id", flat=True)
             return qs.filter(student__id__in=student_ids)
 
-        # Staff see only their school
         if user.school:
             return qs.filter(student__school=user.school)
 

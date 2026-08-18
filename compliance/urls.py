@@ -1,21 +1,24 @@
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+
 from .api.viewsets import (
-    AuditLogViewSet,
+    SystemAuditEventViewSet,
+    ComplianceCheckViewSet,
     DataExportLogViewSet,
     SystemHealthViewSet,
-    ComplianceCheckViewSet
 )
 
 # Create router and register viewsets
 router = DefaultRouter()
-router.register(r'audit-logs', AuditLogViewSet, basename='auditlog')
-router.register(r'data-exports', DataExportLogViewSet, basename='dataexport')
-router.register(r'system-health', SystemHealthViewSet, basename='systemhealth')
-router.register(r'compliance-checks', ComplianceCheckViewSet, basename='compliancecheck')
+router.register(r"audit_logs", SystemAuditEventViewSet, basename="auditlog")
+router.register(r"data_exports", DataExportLogViewSet, basename="dataexport")
+router.register(r"system_health", SystemHealthViewSet, basename="systemhealth")
+router.register(
+    r"compliance_checks", ComplianceCheckViewSet, basename="compliancecheck"
+)
 
 urlpatterns = [
-    path('', include(router.urls)),
+    path("", include(router.urls)),
 ]
 
-app_name = 'compliance'
+app_name = "compliance"

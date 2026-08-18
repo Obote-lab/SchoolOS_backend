@@ -1,149 +1,97 @@
 import logging
-from django.db.models.signals import post_save, pre_save, post_delete
-from django.dispatch import receiver
-from django.utils import timezone
 from django.contrib.auth.signals import user_logged_in, user_login_failed
-from .models import CustomUser, UserRole, AuditLog
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
+
+from core.audit import create_audit_log
+from core.choices.identity import AuditActionChoices
+from .models import CustomUser, UserRole
 
 logger = logging.getLogger(__name__)
 
 
-@receiver(post_save, sender=CustomUser)
-def log_user_creation_or_update(sender, instance: CustomUser, created: bool, **kwargs):
-    """
-    Audit user creation and important updates.
-    """
-    if created:
-        if instance.notification_prefs is None and not instance.is_system_root:
-            CustomUser.objects.filter(pk=instance.pk).update(
-                notification_prefs={
-                    "email": True,
-                    "sms": True,
-                    "push": True,
-                    "whatsapp": False,
-                    "must_change_password": True,
-                }
-            )
-
-        # Audit creation
-        AuditLog.objects.create(
-            user=instance.created_by if hasattr(instance, 'created_by') and instance.created_by else None,
-            action_type="CREATE",
-            model_name="CustomUser",
-            record_id=instance.id,
-            new_value=f"User created: {instance.login_id} ({instance.get_full_name()}) - Type: {instance.user_type}",
-            reason="New user registration",
-            school=instance.school,
-            timestamp=timezone.now()
-        )
-    else:
-        # Optional: log updates only for sensitive fields (you can expand later)
-        pass
-
-
-@receiver(post_save, sender=UserRole)
-def log_user_role_change(sender, instance: UserRole, created: bool, **kwargs):
-    """
-    Audit role assignment (create/update)
-    """
-    action = "CREATE" if created else "UPDATE"
-    value = f"{instance.role.name} assigned to {instance.user.login_id} at {instance.school.school_name if instance.school else 'County/National'}"
-    if not created:
-        value += f" (is_primary: {instance.is_primary_role}, valid_until: {instance.valid_until})"
-
-    AuditLog.objects.create(
-        user=instance.assigned_by,
-        action_type=action,
-        model_name="UserRole",
-        record_id=instance.id,
-        new_value=value,
-        reason="Role assignment" if created else "Role update",
-        school=instance.school,
-        timestamp=timezone.now()
-    )
-
-
 @receiver(post_delete, sender=UserRole)
-def log_user_role_deletion_and_reassign(sender, instance: UserRole, **kwargs):
+def reassign_primary_role(sender, instance: UserRole, **kwargs):
     """
-    Log role removal + handle primary role reassignment
+    When a primary role assignment is deleted,
+    automatically promote the most recently assigned
+    active role for the same context (same school or null).
     """
-    logger.warning(f"Role {instance.role.name} removed from {instance.user.login_id} (was primary: {instance.is_primary_role})")
+    if not instance.is_primary_role:
+        return
 
-    # Audit deletion
-    AuditLog.objects.create(
-        user=instance.assigned_by,
-        action_type="DELETE",
-        model_name="UserRole",
-        record_id=instance.id,
-        old_value=f"{instance.role.name} at {instance.school.school_name if instance.school else 'County/National'}",
-        reason="Role assignment revoked",
-        school=instance.school,
-        timestamp=timezone.now()
-    )
-
-    # Reassign primary role if needed
-    if instance.is_primary_role:
-        other_roles = UserRole.objects.filter(
+    replacement = (
+        UserRole.objects.filter(
             user=instance.user,
             school=instance.school,
-            is_active=True
-        ).exclude(id=instance.id)
+            is_active=True,
+        )
+        .exclude(pk=instance.pk)
+        .order_by("-assigned_date")
+        .first()
+    )
 
-        if other_roles.exists():
-            new_primary = other_roles.order_by("-assigned_date").first()
-            new_primary.is_primary_role = True
-            new_primary.save(update_fields=["is_primary_role"])
+    if replacement:
+        replacement.is_primary_role = True
+        replacement.save(update_fields=["is_primary_role"])
 
-            logger.info(f"Reassigned primary role to {new_primary.role.name} for user {instance.user.login_id}")
-
-            # Audit reassignment
-            AuditLog.objects.create(
-                user=new_primary.assigned_by,
-                action_type="UPDATE",
-                model_name="UserRole",
-                record_id=new_primary.id,
-                new_value=f"Set as primary role after deletion of previous primary ({instance.role.name})",
-                reason="Automatic primary role reassignment",
-                school=instance.school,
-                timestamp=timezone.now()
-            )
+        logger.info(
+            "Primary role reassigned to '%s' for user %s",
+            replacement.role.name,
+            instance.user.login_id,
+        )
 
 
 @receiver(user_logged_in)
 def log_successful_login(sender, request, user, **kwargs):
-    """Log successful login with IP and current roles"""
-    current_roles = ", ".join([r.role.name for r in user.user_roles.filter(is_active=True)])
-    AuditLog.objects.create(
-        user=user,
-        action_type="LOGIN",
+    """
+    Reset failed login attempts and create an audit log entry
+    after a successful login.
+    """
+    if user.failed_login_attempts > 0:
+        user.failed_login_attempts = 0
+        user.save(update_fields=["failed_login_attempts"])
+
+    create_audit_log(
+        actor=user,
+        action=AuditActionChoices.LOGIN,
         model_name="CustomUser",
-        record_id=user.id,
-        new_value=f"Successful login - Roles: {current_roles}",
-        reason="User logged in",
+        record_id=user.pk,
         school=user.school,
-        user_ip=request.META.get('REMOTE_ADDR'),
-        timestamp=timezone.now()
+        reason="Successful login",
+        new_value=user.login_id,
+        request=request,
     )
 
 
 @receiver(user_login_failed)
 def log_failed_login(sender, credentials, request, **kwargs):
-    """Log failed login attempt"""
-    login_id = credentials.get('login_id', 'unknown')
+    """
+    Increment failed login attempts, lock the account if needed,
+    and create an audit log entry.
+    """
+    login_id = credentials.get("login_id") or credentials.get("username")
+
+    if not login_id:
+        return
+
+    user = CustomUser.objects.filter(login_id=login_id).first()
+    if not user:
+        return
+
     try:
-        user = CustomUser.objects.filter(login_id=login_id).first()
-        if user:
-            user.record_failed_login()
-            AuditLog.objects.create(
-                user=user,
-                action_type="LOGIN_FAILED",
-                model_name="CustomUser",
-                record_id=user.id,
-                reason=f"Failed login attempt #{user.failed_login_attempts}",
-                school=user.school,
-                user_ip=request.META.get('REMOTE_ADDR') if request else None,
-                timestamp=timezone.now()
-            )
-    except Exception as e:
-        logger.error(f"Failed to log login failure for {login_id}: {e}")
+        user.record_failed_login()
+
+        create_audit_log(
+            actor=user,
+            action=AuditActionChoices.LOGIN_FAILED,
+            model_name="CustomUser",
+            record_id=user.pk,
+            school=user.school,
+            reason=f"Failed login attempt #{user.failed_login_attempts}",
+            new_value=user.login_id,
+            request=request,
+        )
+
+    except Exception:
+        logger.exception("Failed to process failed login for %s", login_id)

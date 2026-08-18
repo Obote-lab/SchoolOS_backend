@@ -1,25 +1,25 @@
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+
 from .api.viewsets import (
-    SubjectViewSet,
-    SubjectAssignmentViewSet,
-    ExamViewSet,
-    ExamResultViewSet,
     ContinuousAssessmentViewSet,
+    ExamResultViewSet,
+    ExamViewSet,
     GradingSystemViewSet,
+    LessonPlanViewSet,
+    SubjectAssignmentViewSet,
+    SubjectViewSet,
 )
 
 router = DefaultRouter()
+router.register(r"subjects", SubjectViewSet, basename="subject")
+router.register(r"subject-assignments", SubjectAssignmentViewSet, basename="subject-assignment")
+router.register(r"lesson-plans", LessonPlanViewSet, basename="lesson-plan")
+router.register(r"exams", ExamViewSet, basename="exam")
+router.register(r"exam-results", ExamResultViewSet, basename="exam-result")
+router.register(r"continuous-assessments", ContinuousAssessmentViewSet, basename="continuous-assessment")
+router.register(r"grading-systems", GradingSystemViewSet, basename="grading-system")
 
-# Register all viewsets
-router.register(r'subjects', SubjectViewSet, basename='subject')
-router.register(r'subject-assignments', SubjectAssignmentViewSet, basename='subjectassignment')
-router.register(r'exams', ExamViewSet, basename='exam')
-router.register(r'exam-results', ExamResultViewSet, basename='examresult')
-router.register(r'assessments', ContinuousAssessmentViewSet, basename='continuousassessment')
-router.register(r'grading-systems', GradingSystemViewSet, basename='gradingsystem')
-
-# Simple URL patterns
 urlpatterns = [
-    path('', include(router.urls)),
+    path("", include(router.urls)),
 ]

@@ -1,194 +1,208 @@
-# from django.contrib import admin
-# from django.utils.translation import gettext_lazy as _
+from django.contrib import admin
+from django.utils.translation import gettext_lazy as _
 
-# from .models import (
-#     Subject,
-#     SubjectAssignment,
-#     Exam,
-#     ExamResult,
-#     ContinuousAssessment,
-#     GradingSystem,
-# )
-
-
-# @admin.register(Subject)
-# class SubjectAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "subject_code",
-#         "subject_name",
-#         "category",
-#         "level",
-#         "is_active",
-#         "school_id",
-#     )
-#     list_filter = ("category", "level", "is_active")
-#     search_fields = ("subject_code", "subject_name")
-#     list_per_page = 25
-
-#     fieldsets = (
-#         (_("Basic Information"), {
-#             "fields": ("subject_name", "subject_code", "school_id")
-#         }),
-#         (_("Classification"), {
-#             "fields": ("category", "level")
-#         }),
-#         (_("Academic Details"), {
-#             "fields": ("periods_per_week", "exam_weight"),
-#             "classes": ("collapse",)
-#         }),
-#         (_("Status & Metadata"), {
-#             "fields": ("is_active", "created_at", "updated_at"),
-#             "classes": ("collapse",)
-#         }),
-#     )
-
-#     readonly_fields = ("created_at", "updated_at")
+from .models import (
+    ContinuousAssessment,
+    Exam,
+    ExamResult,
+    GradingSystem,
+    LessonPlan,
+    Subject,
+    SubjectAssignment,
+)
 
 
-# @admin.register(SubjectAssignment)
-# class SubjectAssignmentAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "subject",
-#         "teacher_id",
-#         "class_room_id",
-#         "academic_year_id",
-#         "term_id",
-#         "is_primary",
-#     )
-#     list_filter = ("is_primary", "subject")
-#     search_fields = ("subject__subject_name", "teacher_id", "class_room_id")
-#     raw_id_fields = ("subject",)
-#     readonly_fields = ("created_at",)
+@admin.register(Subject)
+class SubjectAdmin(admin.ModelAdmin):
+    list_display = (
+        "code",
+        "name",
+        "category",
+        "level",
+        "stream",
+        "school",
+        "is_active",
+        "periods_per_week",
+    )
+    list_filter = ("category", "level", "stream", "is_active", "school")
+    search_fields = ("code", "name", "school__school_name")
+    readonly_fields = ("id", "created_at", "updated_at")
+    raw_id_fields = ("school", "department", "created_by")
+    ordering = ("code",)
 
-#     fieldsets = (
-#         (_("Assignment"), {
-#             "fields": ("subject", "teacher_id", "class_room_id")
-#         }),
-#         (_("Academic Period"), {
-#             "fields": ("academic_year_id", "term_id")
-#         }),
-#         (_("Details"), {
-#             "fields": ("is_primary",)
-#         }),
-#         (_("Metadata"), {
-#             "fields": ("created_at",),
-#             "classes": ("collapse",)
-#         }),
-#     )
-
-
-
-
-
-# @admin.register(Exam)
-# class ExamAdmin(admin.ModelAdmin):
-#     list_display = ("name", "exam_date", "exam_status", "total_marks", "weight")
-#     list_filter = ("exam_status", "academic_year_id", "term_id")
-#     search_fields = ("name", "subject__subject_name")
-#     date_hierarchy = "exam_date"
-#     raw_id_fields = ("subject",)
-#     readonly_fields = ("created_at", "updated_at")
-
-#     fieldsets = (
-#         (_("Basic Info"), {
-#             "fields": ("name", "academic_year_id", "term_id")
-#         }),
-#         (_("Scope"), {
-#             "fields": ("subject_id", "class_room_id")
-#         }),
-#         (_("Details"), {
-#             "fields": ("total_marks", "weight")
-#         }),
-#         (_("Scheduling"), {
-#             "fields": ("exam_date", "start_time", "end_time")
-#         }),
-#         (_("Status"), {
-#             "fields": ("exam_status", "is_compulsory")
-#         }),
-#         (_("Metadata"), {
-#             "fields": ("created_at", "updated_at"),
-#             "classes": ("collapse",)
-#         }),
-#     )
+    fieldsets = (
+        (_("Basic Info"), {
+            "fields": (
+                "school",
+                "name",
+                "code",
+                "department",
+                "category",
+                "level",
+                "stream",
+            )
+        }),
+        (_("Teaching Details"), {
+            "fields": (
+                "periods_per_week",
+                "exam_weight",
+                "passing_grade",
+                "recommended_textbooks",
+            )
+        }),
+        (_("Status"), {
+            "fields": ("is_active", "created_by", "created_at", "updated_at"),
+        }),
+    )
 
 
-# @admin.register(ExamResult)
-# class ExamResultAdmin(admin.ModelAdmin):
-#     list_display = ("student_id", "subject", "exam", "marks", "grade")
-#     list_filter = ("grade", "exam__exam_status")
-#     search_fields = ("student_id", "subject__subject_name", "exam__name")
-#     raw_id_fields = ("subject", "exam")
-#     readonly_fields = ("created_at",)
-
-#     fieldsets = (
-#         (_("Core"), {
-#             "fields": ("student_id", "exam", "subject")
-#         }),
-#         (_("Result"), {
-#             "fields": ("marks", "grade", "remark")
-#         }),
-#         (_("Metadata"), {
-#             "fields": ("created_at",),
-#             "classes": ("collapse",)
-#         }),
-#     )
-
-
-# @admin.register(ContinuousAssessment)
-# class ContinuousAssessmentAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "student_id",
-#         "subject",
-#         "assessment_type",
-#         "title",
-#         "marks_obtained",
-#         "maximum_marks",
-#         "date_assigned",
-#     )
-#     list_filter = ("assessment_type", "date_assigned")
-#     search_fields = ("student_id", "subject__subject_name", "title")
-#     date_hierarchy = "date_assigned"
-#     raw_id_fields = ("subject",)
-#     readonly_fields = ("created_at", "updated_at")
-
-#     fieldsets = (
-#         (_("Core"), {
-#             "fields": ("student_id", "subject", "assessment_type", "title")
-#         }),
-#         (_("Marks"), {
-#             "fields": ("maximum_marks", "marks_obtained")
-#         }),
-#         (_("Dates"), {
-#             "fields": ("date_assigned", "date_marked")
-#         }),
-#         (_("Metadata"), {
-#             "fields": ("created_at", "updated_at"),
-#             "classes": ("collapse",)
-#         }),
-#     )
+@admin.register(SubjectAssignment)
+class SubjectAssignmentAdmin(admin.ModelAdmin):
+    list_display = (
+        "subject",
+        "teacher",
+        "class_room",
+        "academic_year",
+        "term",
+        "is_primary",
+        "hours_per_week",
+    )
+    list_filter = ("is_primary", "academic_year", "term", "subject__school")
+    search_fields = (
+        "subject__name",
+        "subject__code",
+        "teacher__user__first_name",
+        "teacher__user__last_name",
+        "class_room__classroom_name",
+    )
+    readonly_fields = ("id", "created_at")
+    raw_id_fields = ("subject", "teacher", "class_room", "academic_year", "term")
+    ordering = ("-created_at",)
 
 
-# @admin.register(GradingSystem)
-# class GradingSystemAdmin(admin.ModelAdmin):
-#     list_display = ("name", "system_type", "is_active")
-#     list_filter = ("system_type", "is_active")
-#     search_fields = ("name", "school_id")
-#     readonly_fields = ("created_at", "updated_at")
-
-#     fieldsets = (
-#         (_("Core"), {
-#             "fields": ("name", "system_type", "school_id")
-#         }),
-#         (_("Configuration"), {
-#             "fields": ("grade_scale", "default_exam_weight")
-#         }),
-#         (_("Status"), {
-#             "fields": ("is_active",)
-#         }),
-#         (_("Metadata"), {
-#             "fields": ("created_at", "updated_at"),
-#             "classes": ("collapse",)
-#         }),
-#     )
+@admin.register(LessonPlan)
+class LessonPlanAdmin(admin.ModelAdmin):
+    list_display = (
+        "topic",
+        "week_number",
+        "date",
+        "lesson_plan_status",
+        "actual_date_taught",
+        "subject_assignment",
+    )
+    list_filter = (
+        "lesson_plan_status",
+        "week_number",
+        "subject_assignment__subject__school",
+    )
+    search_fields = ("topic", "sub_topic", "subject_assignment__subject__name")
+    readonly_fields = ("id", "created_at", "updated_at")
+    raw_id_fields = ("subject_assignment", "created_by")
+    ordering = ("week_number", "date")
 
 
+@admin.register(Exam)
+class ExamAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "exam_date",
+        "term",
+        "exam_status",
+        "subject",
+        "class_room",
+        "total_marks",
+    )
+    list_filter = ("exam_status", "term", "academic_year", "is_compulsory")
+    search_fields = ("name", "subject__name", "class_room__classroom_name")
+    readonly_fields = ("id", "created_at", "updated_at")
+    raw_id_fields = (
+        "term",
+        "academic_year",
+        "subject",
+        "class_room",
+        "supervisor",
+        "paper_setter",
+        "moderator",
+    )
+    ordering = ("-exam_date",)
+
+    fieldsets = (
+        (_("Exam Info"), {
+            "fields": (
+                "name",
+                "term",
+                "academic_year",
+                "subject",
+                "class_room",
+                "total_marks",
+                "passing_marks",
+                "weight",
+            )
+        }),
+        (_("Scheduling"), {
+            "fields": ("exam_date", "start_time", "end_time", "venue"),
+        }),
+        (_("Personnel"), {
+            "fields": ("supervisor", "paper_setter", "moderator"),
+        }),
+        (_("Status"), {
+            "fields": ("exam_status", "publish_date", "is_compulsory", "instructions"),
+        }),
+    )
+
+
+@admin.register(ExamResult)
+class ExamResultAdmin(admin.ModelAdmin):
+    list_display = (
+        "student",
+        "exam",
+        "subject",
+        "marks",
+        "grade",
+        "position_in_class",
+        "marked_by",
+    )
+    list_filter = ("exam__exam_status", "subject__school", "appeal_status")
+    search_fields = (
+        "student__admission_number",
+        "student__user__first_name",
+        "student__user__last_name",
+        "exam__name",
+    )
+    readonly_fields = ("id", "marking_date", "created_at")
+    raw_id_fields = ("student", "subject", "exam", "marked_by", "verified_by")
+    ordering = ("-marks",)
+
+
+@admin.register(ContinuousAssessment)
+class ContinuousAssessmentAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "assessment_type",
+        "student",
+        "subject",
+        "marks_obtained",
+        "maximum_marks",
+        "date_assigned",
+    )
+    list_filter = ("assessment_type", "term", "subject__school")
+    search_fields = ("title", "student__admission_number")
+    readonly_fields = ("id", "date_marked", "created_at", "updated_at")
+    raw_id_fields = ("student", "subject", "term", "marked_by")
+    ordering = ("-date_assigned",)
+
+
+@admin.register(GradingSystem)
+class GradingSystemAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "school",
+        "system_type",
+        "default_exam_weight",
+        "is_active",
+    )
+    list_filter = ("system_type", "is_active", "school")
+    search_fields = ("name", "school__school_name")
+    readonly_fields = ("id", "created_at", "updated_at")
+    raw_id_fields = ("school",)
+    ordering = ("name",)

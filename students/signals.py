@@ -1,138 +1,156 @@
 import logging
-from django.apps import apps
+
 from django.db import transaction
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
-from schools.models import ClassRoom
 
-from .models import ParentGuardian, Student
+from core.choices.students import StudentStatusChoices
+from .models import ParentGuardian, StudentProfile
 
 logger = logging.getLogger(__name__)
 
 
-def _update_related_count(related_instance, related_field_name, count_field_name):
-    """
-    Generic helper to update a denormalized count field on a related model.
-    
-    Example:
-        _update_related_count(student.current_class, 'students', 'current_enrollment')
-    """
-    if not related_instance:
+def _update_classroom_enrollment(classroom):
+    """Safely update a classroom's current_enrollment count."""
+    if not classroom:
         return
 
     try:
-        with transaction.atomic():
-            count = related_instance.__class__.objects.filter(
-                **{related_field_name: related_instance},
-                student_status=Student.StudentStatusChoices.ACTIVE
-            ).count()
-
-            related_instance.__class__.objects.filter(
-                pk=related_instance.pk
-            ).update(**{count_field_name: count})
-
-    except Exception as e:
-        logger.warning(
-            f"Failed to update {related_instance.__class__.__name__}.{count_field_name}: {e}",
-            exc_info=True
-        )
-
-
-#  Student → ClassRoom enrollment sync
-@receiver(post_save, sender=Student)
-def sync_classroom_enrollment(sender, instance: Student, **kwargs):
-    """
-    Update ClassRoom.current_enrollment when a student's class changes
-    or status changes.
-    """
-    # Only care about active students or status changes
-    if kwargs.get('created') or instance.student_status != Student.StudentStatusChoices.ACTIVE:
-        _update_related_count(instance.current_class, 'students', 'current_enrollment')
-
-    # If class changed, update old class too
-    if hasattr(instance, '_old_class') and instance._old_class != instance.current_class:
-        _update_related_count(instance._old_class, 'students', 'current_enrollment')
-
-
-@receiver(post_delete, sender=Student)
-def decrement_classroom_enrollment(sender, instance: Student, **kwargs):
-    """Decrease count when student is deleted."""
-    _update_related_count(instance.current_class, 'students', 'current_enrollment')
-
-
-
-#  Student → Dormitory occupancy sync (optional)
-def get_dormitory_model():
-    try:
-        return apps.get_model("dormitory", "Dormitory")
-    except LookupError:
-        return None
-
-
-@receiver(post_save, sender=Student)
-def sync_dormitory_occupancy(sender, instance: Student, **kwargs):
-    """
-    Keep Dormitory.current_occupancy in sync (if dormitory app is installed).
-    """
-    Dormitory = get_dormitory_model()
-    if not Dormitory:
-        return
-
-    old_house = getattr(instance, '_old_boarding_house', None)
-    new_house = instance.boarding_house
-    if new_house:
-        _update_related_count(new_house, 'students', 'current_occupancy')
-    if old_house and old_house != new_house:
-        _update_related_count(old_house, 'students', 'current_occupancy')
-
-
-@receiver(post_delete, sender=Student)
-def decrement_dormitory_occupancy(sender, instance: Student, **kwargs):
-    Dormitory = get_dormitory_model()
-    if not Dormitory or not instance.boarding_house:
-        return
-    _update_related_count(instance.boarding_house, 'students', 'current_occupancy')
-
-
-
-#  ParentGuardian → Student emergency contact sync
-@receiver(post_save, sender=ParentGuardian)
-def sync_primary_guardian_to_student(sender, instance: ParentGuardian, **kwargs):
-    """
-    When a primary guardian is saved, sync their details to student's emergency contact.
-    Also ensure only one primary guardian per student.
-    """
-    if not instance.is_primary or not instance.student:
-        return
-
-    # Demote any other primary guardians
-    ParentGuardian.objects.filter(
-        student=instance.student,
-        is_primary=True
-    ).exclude(pk=instance.pk).update(is_primary=False)
-
-    # Sync emergency contact info
-    try:
-        Student.objects.filter(pk=instance.student.pk).update(
-            emer_contact_name=instance.user.get_full_name(),
-            emer_contact_phone=getattr(instance.user, 'phone', instance.alternate_phone or ''),
-            emer_contact_relation=instance.relationship,
+        count = classroom.current_students.filter(
+            student_status=StudentStatusChoices.ACTIVE
+        ).count()
+        type(classroom).objects.filter(pk=classroom.pk).update(
+            current_enrollment=count
         )
     except Exception as e:
-        logger.warning(f"Failed to sync primary guardian to student {instance.student}: {e}")
+        logger.warning("Failed to update classroom enrollment for %s: %s", classroom, e)
 
 
-#  Track old values for change detection (pre_save)
-@receiver(pre_save, sender=Student)
-def store_old_class_and_dorm(sender, instance: Student, **kwargs):
-    """
-    Store previous class and dormitory so we can update counts correctly
-    when they change.
-    """
-    if instance.pk:
-        old = Student.objects.get(pk=instance.pk)
-        instance._old_class = old.current_class
-        instance._old_boarding_house = old.boarding_house
-    else:
+def _update_dormitory_occupancy(dormitory):
+    """Safely update a dormitory's occupancy count (if the field exists)."""
+    if not dormitory or not hasattr(dormitory, "current_occupancy"):
+        return
+
+    try:
+        count = dormitory.current_students.filter(
+            student_status=StudentStatusChoices.ACTIVE
+        ).count()
+        type(dormitory).objects.filter(pk=dormitory.pk).update(
+            current_occupancy=count
+        )
+    except Exception as e:
+        logger.warning("Failed to update dormitory occupancy for %s: %s", dormitory, e)
+
+
+# StudentProfile signals
+@receiver(pre_save, sender=StudentProfile)
+def store_old_values_for_sync(sender, instance: StudentProfile, **kwargs):
+    """Store previous class and boarding house for change detection."""
+    if not instance.pk:
         instance._old_class = None
         instance._old_boarding_house = None
+        return
+
+    try:
+        old = StudentProfile.objects.only("current_class", "boarding_house").get(pk=instance.pk)
+        instance._old_class = old.current_class
+        instance._old_boarding_house = old.boarding_house
+    except StudentProfile.DoesNotExist:
+        instance._old_class = None
+        instance._old_boarding_house = None
+
+
+@receiver(post_save, sender=StudentProfile)
+def sync_classroom_and_dormitory_counts(sender, instance: StudentProfile, **kwargs):
+    """Update enrollment / occupancy counts when class or dorm changes."""
+    # Current class
+    if instance.current_class:
+        _update_classroom_enrollment(instance.current_class)
+
+    # Old class (if changed)
+    if hasattr(instance, "_old_class") and instance._old_class != instance.current_class:
+        _update_classroom_enrollment(instance._old_class)
+
+    # Current dormitory
+    if instance.boarding_house:
+        _update_dormitory_occupancy(instance.boarding_house)
+
+    # Old dormitory (if changed)
+    if (
+        hasattr(instance, "_old_boarding_house")
+        and instance._old_boarding_house != instance.boarding_house
+    ):
+        _update_dormitory_occupancy(instance._old_boarding_house)
+
+
+@receiver(post_delete, sender=StudentProfile)
+def cleanup_student_counts(sender, instance: StudentProfile, **kwargs):
+    """Clean up counts when a student profile is deleted."""
+    if instance.current_class:
+        _update_classroom_enrollment(instance.current_class)
+    if instance.boarding_house:
+        _update_dormitory_occupancy(instance.boarding_house)
+
+
+@receiver(post_save, sender=StudentProfile)
+def invalidate_cached_metrics(sender, instance: StudentProfile, created: bool, **kwargs):
+    """Reset cached metrics when important student data changes."""
+    if created:
+        return
+
+    # Only clear the cached fields – avoid recursion by using update()
+    StudentProfile.objects.filter(pk=instance.pk).update(
+        attendance_rate=None,
+        average_grade=None,
+        fee_compliance_rate=None,
+    )
+
+
+# ParentGuardian signals
+@receiver(post_save, sender=ParentGuardian)
+def ensure_single_primary_guardian(sender, instance: ParentGuardian, **kwargs):
+    """
+    Ensure only one primary guardian per student.
+    Because ParentGuardian ↔ Student is M2M, we handle it carefully.
+    """
+    if not instance.is_primary:
+        return
+
+    # Demote other primary guardians linked to the same students
+    for student in instance.students.all():
+        ParentGuardian.objects.filter(
+            students=student,
+            is_primary=True,
+        ).exclude(pk=instance.pk).update(is_primary=False)
+
+
+@receiver(post_save, sender=ParentGuardian)
+def sync_primary_guardian_to_emergency_contact(sender, instance: ParentGuardian, **kwargs):
+    """
+    When a guardian is marked primary, copy their contact info
+    into the student's emergency contact fields.
+    """
+    if not instance.is_primary:
+        return
+
+    try:
+        for student in instance.students.all():
+            StudentProfile.objects.filter(pk=student.pk).update(
+                emer_contact_name=instance.user.get_full_name(),
+                emer_contact_phone=instance.user.phone or instance.alternate_phone or "",
+                emer_contact_relation=instance.get_relationship_display(),
+            )
+    except Exception as e:
+        logger.warning("Failed to sync primary guardian contact: %s", e)
+
+
+    def _update_school_enrollment(school):
+        if not school:
+            return
+        try:
+            count = school.students.filter(
+                student_status=StudentStatusChoices.ACTIVE
+            ).count()
+            type(school).objects.filter(pk=school.pk).update(current_enrollment=count)
+        except Exception as e:
+            logger.warning("Failed to update school enrollment for %s: %s", school, e)
