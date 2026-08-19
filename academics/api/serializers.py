@@ -2,7 +2,6 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from students.models import StudentProfile
-
 from ..models import (
     ContinuousAssessment,
     Exam,
@@ -12,6 +11,10 @@ from ..models import (
     Subject,
     SubjectAssignment,
 )
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
+
+
 
 
 # Helper to safely get related object string representation
@@ -55,11 +58,17 @@ class SubjectListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_school_name(self, obj) -> str:
         return get_related_display(obj, "school", "school_name")
 
-    def get_department_name(self, obj) -> str:
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_term_name(self, obj) -> str | None:
         return get_related_display(obj, "department", "department_name")
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_department_name(self, obj) -> str | None:
+        return obj.department.name if obj.department else None
 
 
 class SubjectAssignmentListSerializer(serializers.ModelSerializer):
@@ -91,20 +100,21 @@ class SubjectAssignmentListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_teacher_name(self, obj) -> str:
         return get_related_display(obj, "teacher", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_class_name(self, obj) -> str:
         return get_related_display(obj, "class_room", "classroom_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_term_name(self, obj) -> str:
         return get_related_display(obj, "term", "name", fallback=None)
 
 
 class LessonPlanListSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(
-        source="subject_assignment.subject.name", read_only=True
-    )
+    subject_name = serializers.CharField(source="subject_assignment.subject.name", read_only=True)
     teacher_name = serializers.SerializerMethodField()
     class_name = serializers.SerializerMethodField()
 
@@ -128,9 +138,11 @@ class LessonPlanListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_teacher_name(self, obj) -> str:
         return get_related_display(obj.subject_assignment, "teacher", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_class_name(self, obj) -> str:
         return get_related_display(
             obj.subject_assignment, "class_room", "classroom_name"
@@ -138,12 +150,8 @@ class LessonPlanListSerializer(serializers.ModelSerializer):
 
 
 class ExamListSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(
-        source="subject.name", read_only=True, allow_null=True
-    )
-    class_name = serializers.CharField(
-        source="class_room.classroom_name", read_only=True, allow_null=True
-    )
+    subject_name = serializers.CharField(source="subject.name", read_only=True, allow_null=True)
+    class_name = serializers.CharField(source="class_room.classroom_name", read_only=True, allow_null=True)
     term_name = serializers.CharField(source="term.name", read_only=True)
     supervisor_name = serializers.SerializerMethodField(allow_null=True)
 
@@ -175,6 +183,8 @@ class ExamListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+
+    @extend_schema_field(OpenApiTypes.STR)
     def get_supervisor_name(self, obj) -> str:
         return get_related_display(obj, "supervisor", "full_name", fallback=None)
 
@@ -208,9 +218,11 @@ class ExamResultListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_student_name(self, obj) -> str:
         return get_related_display(obj, "student", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_admission_number(self, obj) -> str:
         return get_related_display(obj, "student", "admission_number")
 
@@ -248,12 +260,15 @@ class ContinuousAssessmentListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_student_name(self, obj) -> str:
         return get_related_display(obj, "student", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_admission_number(self, obj) -> str:
         return get_related_display(obj, "student", "admission_number")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_marked_by_name(self, obj) -> str:
         return get_related_display(obj, "marked_by", "get_full_name", fallback=None)
 
@@ -275,6 +290,7 @@ class GradingSystemListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_school_name(self, obj) -> str:
         return get_related_display(obj, "school", "school_name")
 
@@ -289,17 +305,18 @@ class SubjectDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at", "created_by"]
 
+
+    @extend_schema_field(OpenApiTypes.STR)
     def get_school_name(self, obj) -> str:
         return get_related_display(obj, "school", "school_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_department_name(self, obj) -> str:
         return get_related_display(obj, "department", "department_name")
 
 
 class LessonPlanDetailSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(
-        source="subject_assignment.subject.name", read_only=True
-    )
+    subject_name = serializers.CharField(source="subject_assignment.subject.name", read_only=True)
     teacher_name = serializers.SerializerMethodField()
     class_name = serializers.SerializerMethodField()
 
@@ -308,9 +325,11 @@ class LessonPlanDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at", "created_by"]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_teacher_name(self, obj) -> str:
         return get_related_display(obj.subject_assignment, "teacher", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_class_name(self, obj) -> str:
         return get_related_display(
             obj.subject_assignment, "class_room", "classroom_name"
@@ -318,12 +337,8 @@ class LessonPlanDetailSerializer(serializers.ModelSerializer):
 
 
 class ExamDetailSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(
-        source="subject.name", read_only=True, allow_null=True
-    )
-    class_name = serializers.CharField(
-        source="class_room.classroom_name", read_only=True, allow_null=True
-    )
+    subject_name = serializers.CharField(source="subject.name", read_only=True, allow_null=True)
+    class_name = serializers.CharField(source="class_room.classroom_name", read_only=True, allow_null=True)
     term_name = serializers.CharField(source="term.name", read_only=True)
     supervisor_name = serializers.SerializerMethodField(allow_null=True)
     paper_setter_name = serializers.SerializerMethodField(allow_null=True)
@@ -334,12 +349,15 @@ class ExamDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at"]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_supervisor_name(self, obj) -> str:
         return get_related_display(obj, "supervisor", "full_name", fallback=None)
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_paper_setter_name(self, obj) -> str:
         return get_related_display(obj, "paper_setter", "full_name", fallback=None)
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_moderator_name(self, obj) -> str:
         return get_related_display(obj, "moderator", "full_name", fallback=None)
 
@@ -357,15 +375,19 @@ class ExamResultDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "marking_date"]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_student_name(self, obj) -> str:
         return get_related_display(obj, "student", "full_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_admission_number(self, obj) -> str:
         return get_related_display(obj, "student", "admission_number")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_marked_by_name(self, obj) -> str:
         return get_related_display(obj, "marked_by", "get_full_name", fallback=None)
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_verified_by_name(self, obj) -> str:
         return get_related_display(obj, "verified_by", "get_full_name", fallback=None)
 
@@ -387,13 +409,24 @@ class SubjectCreateSerializer(serializers.ModelSerializer):
             "exam_weight",
             "passing_grade",
         ]
-        read_only_fields = ["created_by"]
+        extra_kwargs = {"school": {"required": False}}
 
     def validate(self, data):
+        request = self.context.get("request")
+        school = data.get("school") or getattr(request, "school", None)
+        if not school:
+            raise serializers.ValidationError({"school": "School context is required."})
+        data["school"] = school
+
         if data.get("exam_weight", 0) > 100:
             raise serializers.ValidationError({"exam_weight": "Cannot exceed 100%"})
-        return data
 
+        dept = data.get("department")
+        if dept and dept.school_id != school.id:
+            raise serializers.ValidationError(
+                {"department": "Department must belong to this school."}
+            )
+        return data
 
     def create(self, validated_data):
         request = self.context.get("request")
@@ -401,6 +434,46 @@ class SubjectCreateSerializer(serializers.ModelSerializer):
             validated_data["created_by"] = request.user
         return super().create(validated_data)
 
+
+class SubjectAssignmentCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SubjectAssignment
+        fields = [
+            "subject",
+            "teacher",
+            "class_room",
+            "academic_year",
+            "term",
+            "is_primary",
+            "hours_per_week",
+            "schedule",
+            "performance_target",
+        ]
+
+    def validate(self, data):
+        subject = data["subject"]
+        teacher = data["teacher"]
+        class_room = data["class_room"]
+        year = data["academic_year"]
+        term = data.get("term")
+
+        if teacher.school_id != subject.school_id:
+            raise serializers.ValidationError(
+                {"teacher": "Teacher must be in the subject's school."}
+            )
+        if class_room.school_id != subject.school_id:
+            raise serializers.ValidationError(
+                {"class_room": "Class must be in the subject's school."}
+            )
+        if year.school_id != subject.school_id:
+            raise serializers.ValidationError(
+                {"academic_year": "Year must match subject school."}
+            )
+        if term and term.academic_year_id != year.id:
+            raise serializers.ValidationError(
+                {"term": "Term must belong to the academic year."}
+            )
+        return data
 
 class LessonPlanCreateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -486,11 +559,6 @@ class ExamResultCreateSerializer(serializers.ModelSerializer):
             "previous_marks",
         ]
 
-    # def validate_marks(self, value):
-    #     exam = self.initial_data.get("exam") or getattr(self.instance, "exam", None)
-    #     if exam and value > exam.total_marks:
-    #         raise serializers.ValidationError(f"Marks cannot exceed {exam.total_marks}")
-    #     return value
 
     def validate(self, data):
         exam = data.get("exam") or getattr(self.instance, "exam", None)
@@ -547,11 +615,7 @@ class ContinuousAssessmentCreateSerializer(serializers.ModelSerializer):
 class BulkExamResultsUploadSerializer(serializers.Serializer):
     exam = serializers.UUIDField()
     subject = serializers.UUIDField()
-    results = serializers.ListField(
-        child=serializers.DictField(),
-        min_length=1,
-        help_text="List of dicts: {'student_admission': str, 'marks': float, 'grade': str, 'remark': str}",
-    )
+    results = serializers.ListField(child=serializers.DictField(),min_length=1,help_text="List of dicts: {'student_admission': str, 'marks': float, 'grade': str, 'remark': str}",)
 
     @transaction.atomic
     def create(self, validated_data):
@@ -612,10 +676,70 @@ class GradingSystemSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at"]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_school_name(self, obj) -> str:
         return get_related_display(obj, "school", "school_name")
 
+    @extend_schema_field(OpenApiTypes.STR)
     def validate_default_exam_weight(self, value):
         if value < 0 or value > 100:
             raise serializers.ValidationError("Weight must be 0–100")
         return value
+
+
+
+class BulkResultRowSerializer(serializers.Serializer):
+    student_admission = serializers.CharField()
+    marks = serializers.DecimalField(max_digits=6, decimal_places=2)
+    grade = serializers.CharField(required=False, allow_blank=True, default="")
+    remark = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class BulkExamResultsUploadSerializer(serializers.Serializer):
+    exam = serializers.UUIDField()
+    subject = serializers.UUIDField()
+    results = BulkResultRowSerializer(many=True)
+
+    @transaction.atomic
+    def create(self, validated_data):
+        request = self.context["request"]
+        user = request.user
+        school = getattr(request, "school", None) or getattr(user, "school", None)
+        if not school:
+            raise serializers.ValidationError("School context is required.")
+
+        exam_id = validated_data["exam"]
+        subject_id = validated_data["subject"]
+        # optional: verify exam/subject belong to school
+
+        created, errors = [], []
+        for idx, row in enumerate(validated_data["results"], 1):
+            admission = row["student_admission"]
+            try:
+                student = StudentProfile.objects.get(
+                    admission_number=admission, school=school
+                )
+                result, was_created = ExamResult.objects.update_or_create(
+                    student=student,
+                    exam_id=exam_id,
+                    defaults={
+                        "subject_id": subject_id,
+                        "marks": row["marks"],
+                        "grade": row.get("grade") or "",
+                        "remark": row.get("remark") or "",
+                        "marked_by": user,
+                    },
+                )
+                created.append({
+                    "row": idx,
+                    "student": admission,
+                    "marks": str(row["marks"]),
+                    "result_id": str(result.id),
+                    "created": was_created,
+                })
+            except StudentProfile.DoesNotExist:
+                errors.append({"row": idx, "error": f"Student {admission} not found"})
+            except Exception as e:
+                errors.append({"row": idx, "error": str(e)})
+
+        return {"created": created, "errors": errors}

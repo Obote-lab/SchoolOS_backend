@@ -65,6 +65,51 @@ class AttendanceSessionCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class AttendanceSessionWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AttendanceSession
+        fields = [
+            "session_type",
+            "reference_id",
+            "date",
+            "start_time",
+            "end_time",
+            "expected_count",
+            "notes",
+            "venue_name",
+            "location",
+            "is_automated",
+            "device_id",
+        ]
+
+    def validate(self, data):
+        start = data.get("start_time") or getattr(self.instance, "start_time", None)
+        end = data.get("end_time") or getattr(self.instance, "end_time", None)
+        if end and start and end <= start:
+            raise serializers.ValidationError(
+                {"end_time": "Must be after start_time"}
+            )
+        return data
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        school = getattr(request, "school", None) or getattr(request.user, "school", None)
+        if not school:
+            raise serializers.ValidationError("School context is required.")
+        if not school.current_academic_year_id or not school.current_term_id:
+            raise serializers.ValidationError(
+                "School must have a current academic year and term."
+            )
+        validated_data.update(
+            {
+                "school": school,
+                "academic_year": school.current_academic_year,
+                "term": school.current_term,
+                "conducted_by": request.user,
+            }
+        )
+        return super().create(validated_data)
+
 class AttendanceRecordListSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.user.get_full_name", read_only=True)
     admission_number = serializers.CharField(source="student.admission_number", read_only=True)
@@ -234,6 +279,7 @@ class AttendanceRecordWriteSerializer(serializers.ModelSerializer):
 #  Bulk Operations
 class BulkAttendanceItemSerializer(serializers.Serializer):
     student = serializers.UUIDField()
+    student = serializers.IntegerField()
     attendance_record_status = serializers.ChoiceField(choices=AttendanceRecordStatusChoices.choices)
     check_in_time = serializers.DateTimeField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True)
@@ -410,7 +456,7 @@ class WeeklyAttendanceTrendSerializer(serializers.Serializer):
 
 
 class AtRiskStudentsAlertSerializer(serializers.Serializer):
-    student_id = serializers.UUIDField(source="student_id", read_only=True)
+    student_id = serializers.UUIDField(read_only=True)
     admission_number = serializers.CharField(source="student.admission_number", read_only=True)
     full_name = serializers.CharField(source="student.user.get_full_name", read_only=True)
     current_term_attendance_rate = serializers.FloatField(source="attendance_rate", read_only=True)
@@ -419,11 +465,15 @@ class AtRiskStudentsAlertSerializer(serializers.Serializer):
     risk_level = serializers.ChoiceField(choices=AttendanceRiskLevelChoices.choices, read_only=True)
     last_absent_date = serializers.SerializerMethodField()
     recommended_action = serializers.SerializerMethodField()
-    def get_last_absent_date(self, obj):
+
+
+    @extend_schema_field(OpenApiTypes.DATE)
+    def get_last_absent_date(self, obj) -> dict:
         # optional: query last absent record; or return None for now
         return None
 
-    def get_recommended_action(self, obj):
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_recommended_action(self, obj)-> str:
         if obj.risk_level == AttendanceRiskLevelChoices.CRITICAL:
             return "Immediate parent meeting and guidance referral"
         if obj.risk_level == AttendanceRiskLevelChoices.HIGH:

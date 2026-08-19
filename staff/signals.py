@@ -12,9 +12,7 @@ from .models import StaffAttendance, StaffProfile
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------
 # StaffProfile signals
-# ------------------------------------------------------------------
 @receiver(post_save, sender=StaffProfile)
 def sync_user_active_status(sender, instance: StaffProfile, **kwargs):
     """Keep CustomUser.is_active in sync with StaffProfile.is_active."""
@@ -116,9 +114,7 @@ def deactivate_user_on_staff_delete(sender, instance: StaffProfile, **kwargs):
         logger.error("Failed to deactivate user on staff delete: %s", e)
 
 
-# ------------------------------------------------------------------
 # StaffAttendance signals
-# ------------------------------------------------------------------
 @receiver(pre_save, sender=StaffAttendance)
 def normalize_attendance_data(sender, instance: StaffAttendance, **kwargs):
     """Optional cleanup before saving attendance."""
@@ -149,9 +145,7 @@ def log_attendance_deleted(sender, instance: StaffAttendance, **kwargs):
     )
 
 
-# ------------------------------------------------------------------
 # Cached metrics
-# ------------------------------------------------------------------
 @receiver(post_save, sender=StaffProfile)
 def invalidate_staff_cached_metrics(sender, instance: StaffProfile, created: bool, **kwargs):
     """

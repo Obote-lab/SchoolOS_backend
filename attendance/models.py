@@ -62,10 +62,22 @@ class AttendanceSession(models.Model):
         return f"{self.get_session_type_display()} - {self.date} {self.start_time} ({self.school})"
 
     def clean(self):
+        super().clean()
         if self.end_time and self.start_time and self.end_time <= self.start_time:
             raise ValidationError({"end_time": _("End time must be after start time")})
-        if self.actual_count > self.expected_count and self.expected_count > 0:
-            raise ValidationError({"actual_count": _("Cannot exceed expected count")})
+        # Don't validate actual_count > expected on every clean during live entry;
+        # expected is often a soft target. Prefer a warning in UI or only when closing session.
+
+        if self.academic_year_id and self.school_id:
+            if self.academic_year.school_id != self.school_id:
+                raise ValidationError(
+                    {"academic_year": _("Must belong to this school.")}
+                )
+        if self.term_id and self.academic_year_id:
+            if self.term.academic_year_id != self.academic_year_id:
+                raise ValidationError(
+                    {"term": _("Must belong to the academic year.")}
+                )
 
     def save(self, *args, **kwargs):
         if not self.pk:
@@ -145,10 +157,18 @@ class AttendanceRecord(models.Model):
                 self.attendance_record_status = AttendanceRecordStatusChoices.LATE
 
     def save(self, *args, **kwargs):
-        self.clean()
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()  # uses clean(); avoid calling clean() twice
         super().save(*args, **kwargs)
-        # Update session count
-        self.session.update_actual_count()
+
+    def apply_late_rule(self):
+        if not self.check_in_time or not self.session_id:
+            return
+        ...
+        if self.check_in_time > session_start + grace:
+            if self.attendance_record_status == AttendanceRecordStatusChoices.PRESENT:
+                self.attendance_record_status = AttendanceRecordStatusChoices.LATE
 
 
 class AttendancePattern(models.Model):

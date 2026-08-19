@@ -1,17 +1,12 @@
 import logging
-
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
-
 from core.choices.attendance import AttendanceRecordStatusChoices
 from .models import AttendancePattern, AttendanceRecord
 
 logger = logging.getLogger(__name__)
 
 
-# Session actual_count
-# Note: AttendanceRecord.save() already calls session.update_actual_count().
-# Keep these only if you want a safety net, or remove to avoid double work.
 @receiver(post_save, sender=AttendanceRecord)
 @receiver(post_delete, sender=AttendanceRecord)
 def refresh_session_actual_count(sender, instance: AttendanceRecord, **kwargs):
@@ -20,6 +15,18 @@ def refresh_session_actual_count(sender, instance: AttendanceRecord, **kwargs):
             instance.session.update_actual_count()
         except Exception as e:
             logger.warning("Failed to refresh session count: %s", e)
+
+
+@receiver(post_save, sender=AttendanceRecord)
+@receiver(post_delete, sender=AttendanceRecord)
+def refresh_pattern(sender, instance, **kwargs):
+    session = instance.session
+    pattern, _ = AttendancePattern.objects.get_or_create(
+        student=instance.student,
+        academic_year=session.academic_year,
+        term=session.term,
+    )
+    pattern.recalculate()
 
 
 # Pattern updates

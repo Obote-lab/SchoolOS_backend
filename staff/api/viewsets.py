@@ -19,11 +19,25 @@ from .serializers import (
     StaffProfileDetailSerializer,
     StaffProfileListSerializer,
     StaffProfileUpdateSerializer,
+    StaffDeactivateSerializer,
+
 )
 
 logger = logging.getLogger(__name__)
 
 
+
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.types import OpenApiTypes
+
+@extend_schema_view(
+    list=extend_schema(summary="List staff", responses={200: StaffProfileListSerializer(many=True)}, tags=["Staff"]),
+    retrieve=extend_schema(responses={200: StaffProfileDetailSerializer}, tags=["Staff"]),
+    create=extend_schema(request=StaffProfileCreateSerializer, responses={201: StaffProfileDetailSerializer}, tags=["Staff"]),
+    update=extend_schema(request=StaffProfileUpdateSerializer, responses={200: StaffProfileDetailSerializer}, tags=["Staff"]),
+    partial_update=extend_schema(request=StaffProfileUpdateSerializer, responses={200: StaffProfileDetailSerializer}, tags=["Staff"]),
+    destroy=extend_schema(tags=["Staff"]),
+)
 class StaffProfileViewSet(viewsets.ModelViewSet):
     """
     Manage staff profiles.
@@ -32,9 +46,7 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
     """
 
     module = "staff"
-    queryset = StaffProfile.objects.select_related(
-        "user", "school", "department"
-    )
+    queryset = StaffProfile.objects.select_related("user", "school", "department")
     permission_classes = [IsAuthenticated, HasPermission]
 
     filter_backends = [
@@ -70,17 +82,25 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-
-        # Superusers see everything
         if user.is_superuser:
             return qs
 
-        # Staff member sees only themselves
+        school = getattr(self.request, "school", None) or getattr(user, "school", None)
+
+        # Elevated school roles see whole school roster
+        elevated = user.user_roles.filter(
+            is_active=True,
+            role__name__in=[
+                "Principal", "Deputy Principal", "Administrator",
+                "Head of Department", "HR", "System Root",
+            ],
+        ).exists()
+        if elevated and school:
+            return qs.filter(school=school)
+
         if hasattr(user, "staff_profile"):
             return qs.filter(user=user)
 
-        # Prefer school from middleware, fallback to user.school
-        school = getattr(self.request, "school", None) or user.school
         if school:
             return qs.filter(school=school)
 
@@ -95,7 +115,13 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
             return StaffProfileListSerializer
         return StaffProfileDetailSerializer
 
-    @extend_schema(summary="Deactivate staff member")
+
+    @extend_schema(
+    summary="Deactivate staff",
+    request=StaffDeactivateSerializer,  # or OpenApiTypes.OBJECT
+    responses={200: OpenApiTypes.OBJECT},
+    tags=["Staff"],
+    )
     @action(detail=True, methods=["post"])
     def deactivate(self, request, pk=None):
         staff = self.get_object()
@@ -122,6 +148,8 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
         })
 
 
+
+@extend_schema()
 class StaffAttendanceViewSet(viewsets.ModelViewSet):
     """
     Manage staff attendance records.

@@ -247,3 +247,8 @@ class StaffAttendanceCreateSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             validated_data["recorded_by"] = request.user
         return super().create(validated_data)
+
+
+class StaffDeactivateSerializer(serializers.Serializer):
+    exit_date = serializers.DateField(required=False)
+    exit_reason = serializers.CharField(required=False, allow_blank=True)

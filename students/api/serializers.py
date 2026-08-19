@@ -442,3 +442,12 @@ class StudentSearchSerializer(serializers.Serializer):
         if not any(data.values()):
             raise serializers.ValidationError("Provide at least one search parameter")
         return data
+
+
+class AssignClassSerializer(serializers.Serializer):
+    classroom_id = serializers.UUIDField()  # or IntegerField if PK is int
+
+
+class LinkParentSerializer(serializers.Serializer):
+    parent_id = serializers.IntegerField()  # ParentGuardian pk
+    is_primary = serializers.BooleanField(default=False)

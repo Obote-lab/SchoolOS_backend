@@ -1,19 +1,16 @@
 import logging
 from collections import Counter
-
 from django.db.models import Avg, Max, Min, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema
-from rest_framework import request, viewsets
+from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-
 from accounts.api.permissions import HasPermission
-
 from ..models import (
     ContinuousAssessment,
     Exam,
@@ -42,9 +39,11 @@ from .serializers import (
     SubjectCreateSerializer,
     SubjectDetailSerializer,
     SubjectListSerializer,
+    SubjectAssignmentCreateSerializer,
 )
 from core.choices.academic import ExamStatusChoices, LessonPlanStatusChoices
-
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, extend_schema_view
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +54,8 @@ class CanManageAcademics(IsAuthenticated, HasPermission):
     Admins/HODs can manage all in school
     """
     required_action = "manage_academics"
+    permission_classes = [IsAuthenticated, HasPermission]
+    module = "academics"
 
     def has_object_permission(self, request, view, obj):
         if request.user.is_superuser:
@@ -98,7 +99,14 @@ class CanViewAcademics(IsAuthenticated):
 
 
 #  Subject ViewSet
-@extend_schema(tags=["Subjects"])
+@extend_schema_view(
+    list=extend_schema(summary="List subjects", responses={200: SubjectListSerializer(many=True)}, tags=["Subjects"]),
+    retrieve=extend_schema(responses={200: SubjectDetailSerializer}, tags=["Subjects"]),
+    create=extend_schema(request=SubjectCreateSerializer, responses={201: SubjectDetailSerializer}, tags=["Subjects"]),
+    update=extend_schema(request=SubjectCreateSerializer, responses={200: SubjectDetailSerializer}, tags=["Subjects"]),
+    partial_update=extend_schema(request=SubjectCreateSerializer, responses={200: SubjectDetailSerializer}, tags=["Subjects"]),
+    destroy=extend_schema(tags=["Subjects"]),
+)
 class SubjectViewSet(viewsets.ModelViewSet):
     """
     Manage subjects (CRUD + activation toggle).
@@ -127,8 +135,13 @@ class SubjectViewSet(viewsets.ModelViewSet):
             return qs.filter(school=self.request.school)
         return qs.none()
 
-    @extend_schema(summary="Toggle subject active/inactive status")
-    @action(detail=True, methods=["post"], url_path="toggle_active")
+
+    @extend_schema(
+    summary="Toggle subject active",
+    responses={200: SubjectDetailSerializer},
+    tags=["Subjects"],
+    )
+    @action(detail=True, methods=["post"], url_path="toggle-active") 
     def toggle_active(self, request, pk=None):
         subject = self.get_object()
         subject.is_active = not subject.is_active
@@ -175,7 +188,6 @@ class LessonPlanViewSet(viewsets.ModelViewSet):
     """
     Manage weekly/daily lesson plans per subject assignment.
     """
-
     queryset = LessonPlan.objects.select_related("subject_assignment__subject")
     permission_classes = [CanManageAcademics]
 
@@ -222,7 +234,6 @@ class ExamViewSet(viewsets.ModelViewSet):
     """
     Manage exams/tests (scheduling, lifecycle, results summary).
     """
-
     queryset = Exam.objects.select_related(
         "term",
         "academic_year",
@@ -268,15 +279,20 @@ class ExamViewSet(viewsets.ModelViewSet):
             
         return qs.none()
 
-    @extend_schema(summary="Publish results (marks visible to students/parents)")
+    @extend_schema(
+    summary="Publish exam results",
+    responses={200: ExamDetailSerializer, 400: OpenApiTypes.OBJECT},
+    tags=["Exams"],
+    )
     @action(detail=True, methods=["post"])
     def publish_results(self, request, pk=None):
         exam = self.get_object()
-        if exam.exam_status != ExamStatusChoices.COMPLETED:
-            return Response(
-                {"detail": "Exam must be completed before publishing"},
-                status=400,
-            )
+        has_results = ExamResult.objects.filter(exam=exam).exists()
+        if not has_results:
+            return Response({"detail": "No results to publish."}, status=400)
+        # optional: block if still DRAFT
+        if exam.exam_status == ExamStatusChoices.DRAFT:
+            return Response({"detail": "Schedule/complete exam before publishing."}, status=400)
 
         exam.exam_status = ExamStatusChoices.PUBLISHED
         exam.publish_date = timezone.now().date()
@@ -285,6 +301,26 @@ class ExamViewSet(viewsets.ModelViewSet):
         return Response(ExamDetailSerializer(exam).data)
 
 
+    @action(detail=True, methods=["post"])
+    def mark_completed(self, request, pk=None):
+        exam = self.get_object()
+        exam.exam_status = ExamStatusChoices.COMPLETED
+        exam.save(update_fields=["exam_status"])
+        return Response(ExamDetailSerializer(exam).data)
+
+
+    @extend_schema(summary="Set as school default grading system", responses={200: GradingSystemSerializer}, tags=["Grading Systems"])
+    @action(detail=True, methods=["post"], url_path="set-default")
+    def set_default(self, request, pk=None):
+        grading = self.get_object()
+        school = getattr(request, "school", None)
+        if school and grading.school_id != school.id:
+            return Response({"detail": "Not authorized for this school"}, status=403)
+        grading.is_default = True
+        grading.is_active = True
+        grading.save()  # model save clears other defaults
+        return Response(GradingSystemSerializer(grading).data)
+    
 
     @extend_schema(summary="Get detailed results summary (pass rate, grade distribution)")
     @action(detail=True, methods=["get"])
@@ -323,12 +359,8 @@ class ExamResultViewSet(viewsets.ModelViewSet):
     """
     Manage individual/bulk exam results.
     """
-
-    queryset = ExamResult.objects.select_related(
-        "student", "subject", "exam", "marked_by", "verified_by"
-    )
+    queryset = ExamResult.objects.select_related( "student", "subject", "exam", "marked_by", "verified_by")
     permission_classes = [CanManageAcademics]
-
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ["student", "exam", "subject"]
     search_fields = [
@@ -350,12 +382,17 @@ class ExamResultViewSet(viewsets.ModelViewSet):
             return qs.filter(student__school=self.request.school)
         return qs.none()
 
-    @extend_schema(summary="Bulk upload results via admission numbers")
-    @action(detail=False, methods=["post"])
+
+
+    @extend_schema(
+    summary="Bulk upload results",
+    request=BulkExamResultsUploadSerializer,
+    responses={200: OpenApiTypes.OBJECT},
+    tags=["Exam Results"],
+    )
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
-        serializer = BulkExamResultsUploadSerializer(
-            data=request.data, context={"request": request}
-        )
+        serializer = BulkExamResultsUploadSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         result = serializer.save()
         return Response(result)
@@ -368,9 +405,7 @@ class ContinuousAssessmentViewSet(viewsets.ModelViewSet):
     Manage ongoing assessments (CATs, homework, projects).
     """
 
-    queryset = ContinuousAssessment.objects.select_related(
-        "student", "subject", "term", "marked_by"
-    )
+    queryset = ContinuousAssessment.objects.select_related("student", "subject", "term", "marked_by")
     permission_classes = [CanManageAcademics]
 
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]

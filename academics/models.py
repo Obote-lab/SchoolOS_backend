@@ -16,6 +16,30 @@ from core.choices.academic import (
     ExamStatusChoices,
 )
 
+
+
+
+def _same_school(*objs):
+    """Return school_id if all non-None objs share one school; else raise."""
+    school_ids = []
+    for obj in objs:
+        if obj is None:
+            continue
+        sid = getattr(obj, "school_id", None)
+        if sid is None and hasattr(obj, "school"):
+            sid = getattr(obj.school, "pk", None)
+        if sid is None and hasattr(obj, "subject_id"):
+            # e.g. assignment already loaded
+            pass
+        if sid is not None:
+            school_ids.append(sid)
+    if not school_ids:
+        return None
+    if len(set(school_ids)) > 1:
+        raise ValidationError(_("All related records must belong to the same school."))
+    return school_ids[0]
+
+
 class Subject(models.Model):
     """Core subject/course definition"""
 
@@ -50,8 +74,19 @@ class Subject(models.Model):
 
     def clean(self):
         super().clean()
-        if self.exam_weight > 100:
+        if self.exam_weight is not None and self.exam_weight > 100:
             raise ValidationError({"exam_weight": _("Cannot exceed 100%")})
+        if self.department_id and self.school_id:
+            if self.department.school_id != self.school_id:
+                raise ValidationError(
+                    {"department": _("Department must belong to the same school.")}
+                )
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class SubjectAssignment(models.Model):
@@ -83,6 +118,40 @@ class SubjectAssignment(models.Model):
     def __str__(self):
         return f"{self.subject.code} → {self.teacher.user.get_full_name()} ({self.class_room})"
 
+
+    def clean(self):
+        super().clean()
+        subject_school = self.subject.school_id if self.subject_id else None
+
+        if self.teacher_id and subject_school:
+            if self.teacher.school_id != subject_school:
+                raise ValidationError(
+                    {"teacher": _("Teacher must belong to the subject's school.")}
+                )
+
+        if self.class_room_id and subject_school:
+            if self.class_room.school_id != subject_school:
+                raise ValidationError(
+                    {"class_room": _("Classroom must belong to the subject's school.")}
+                )
+
+        if self.academic_year_id and subject_school:
+            if self.academic_year.school_id != subject_school:
+                raise ValidationError(
+                    {"academic_year": _("Academic year must belong to the subject's school.")}
+                )
+
+        if self.term_id and self.academic_year_id:
+            if self.term.academic_year_id != self.academic_year_id:
+                raise ValidationError(
+                    {"term": _("Term must belong to the selected academic year.")}
+                )
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 class LessonPlan(models.Model):
     """Weekly/daily lesson plan per subject assignment"""
 
@@ -117,6 +186,19 @@ class LessonPlan(models.Model):
     def __str__(self):
         return f"Week {self.week_number} - {self.topic} ({self.date})"
 
+    def clean(self):
+        super().clean()
+        if self.actual_date_taught and self.date:
+            # allow taught before/after planned; no forced status here
+            pass
+        if self.week_number is not None and self.week_number < 1:
+            raise ValidationError({"week_number": _("Week number must be ≥ 1.")})
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 
 class Exam(models.Model):
     """Exam / assessment scheduling"""
@@ -156,10 +238,52 @@ class Exam(models.Model):
         return f"{self.name} ({self.exam_date})"
 
     def clean(self):
+        super().clean()
         if self.start_time and self.end_time and self.start_time >= self.end_time:
             raise ValidationError({"end_time": _("Must be after start time")})
-        if not self.subject and not self.class_room:
-            raise ValidationError(_("Exam must be linked to subject or class"))
+
+        if not self.subject_id and not self.class_room_id:
+            raise ValidationError(_("Exam must be linked to a subject or a class."))
+
+        if self.passing_marks and self.total_marks and self.passing_marks > self.total_marks:
+            raise ValidationError(
+                {"passing_marks": _("Cannot exceed total marks.")}
+            )
+
+        if self.term_id and self.academic_year_id:
+            if self.term.academic_year_id != self.academic_year_id:
+                raise ValidationError(
+                    {"term": _("Term must belong to the selected academic year.")}
+                )
+
+        school_id = None
+        if self.subject_id:
+            school_id = self.subject.school_id
+        if self.class_room_id:
+            if school_id and self.class_room.school_id != school_id:
+                raise ValidationError(
+                    {"class_room": _("Class must match subject's school.")}
+                )
+            school_id = school_id or self.class_room.school_id
+
+        if school_id and self.academic_year_id:
+            if self.academic_year.school_id != school_id:
+                raise ValidationError(
+                    {"academic_year": _("Academic year must match subject/class school.")}
+                )
+
+        for field in ("supervisor", "paper_setter", "moderator"):
+            staff = getattr(self, field, None)
+            if staff and school_id and staff.school_id != school_id:
+                raise ValidationError(
+                    {field: _("Staff must belong to the same school.")}
+                )
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class ExamResult(models.Model):
@@ -199,10 +323,39 @@ class ExamResult(models.Model):
     def __str__(self):
         return f"{self.student.admission_number} - {self.exam.name} ({self.marks})"
 
-    def clean(self):
-        if self.marks > self.exam.total_marks:
-            raise ValidationError({"marks": _("Cannot exceed total marks")})
 
+    def clean(self):
+        super().clean()
+        if self.exam_id and self.marks is not None:
+            if self.marks > self.exam.total_marks:
+                raise ValidationError({"marks": _("Cannot exceed total marks")})
+            if self.marks < 0:
+                raise ValidationError({"marks": _("Marks cannot be negative")})
+
+        if self.student_id and self.subject_id:
+            if self.student.school_id != self.subject.school_id:
+                raise ValidationError(
+                    {"student": _("Student and subject must be in the same school.")}
+                )
+
+        if self.exam_id and self.subject_id and self.exam.subject_id:
+            if self.exam.subject_id != self.subject_id:
+                raise ValidationError(
+                    {"subject": _("Subject must match the exam's subject.")}
+                )
+
+        if self.exam_id and self.student_id:
+            # optional: student class vs exam class_room
+            if self.exam.class_room_id and self.student.current_class_id:
+                if self.student.current_class_id != self.exam.class_room_id:
+                    # soft rule: comment only, or enforce:
+                    pass
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 
 class ContinuousAssessment(models.Model):
     """Formative/continuous assessments (homework, classwork, projects, etc.)"""
@@ -236,10 +389,36 @@ class ContinuousAssessment(models.Model):
         return f"{self.title} - {self.marks_obtained}/{self.maximum_marks}"
 
     def clean(self):
-        if self.marks_obtained > self.maximum_marks:
-            raise ValidationError({"marks_obtained": _("Cannot exceed maximum marks")})
-        if self.weight > 100:
+        super().clean()
+        if self.marks_obtained is not None and self.maximum_marks is not None:
+            if self.marks_obtained > self.maximum_marks:
+                raise ValidationError(
+                    {"marks_obtained": _("Cannot exceed maximum marks")}
+                )
+            if self.marks_obtained < 0:
+                raise ValidationError(
+                    {"marks_obtained": _("Cannot be negative")}
+                )
+        if self.weight is not None and self.weight > 100:
             raise ValidationError({"weight": _("Cannot exceed 100%")})
+
+        if self.student_id and self.subject_id:
+            if self.student.school_id != self.subject.school_id:
+                raise ValidationError(
+                    {"student": _("Student and subject must be in the same school.")}
+                )
+
+        if self.term_id and self.subject_id:
+            if self.term.academic_year.school_id != self.subject.school_id:
+                raise ValidationError(
+                    {"term": _("Term must belong to the subject's school.")}
+                )
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
 
 class GradingSystem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -248,6 +427,9 @@ class GradingSystem(models.Model):
     system_type = models.CharField(max_length=20, default="kcse")
     grade_scale = models.JSONField(default=list)
     default_exam_weight = models.DecimalField(max_digits=5, decimal_places=2, default=60)
+    is_default = models.BooleanField(default=False,
+    help_text=_("Only one default grading system per school should be true."),
+)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -260,5 +442,16 @@ class GradingSystem(models.Model):
 
     def clean(self):
         super().clean()
-        if self.default_exam_weight > 100:
-            raise ValidationError({"default_exam_weight": "Cannot exceed 100"})
+        if self.default_exam_weight is not None and self.default_exam_weight > 100:
+            raise ValidationError({"default_exam_weight": _("Cannot exceed 100")})
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
+        if self.is_default and self.school_id:
+            # enforce single default without recursion
+            type(self).objects.filter(school_id=self.school_id, is_default=True).exclude(
+                pk=self.pk
+            ).update(is_default=False)
