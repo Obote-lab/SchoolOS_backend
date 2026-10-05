@@ -1,11 +1,10 @@
 import uuid
-
 from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models, transaction
 from django.utils import timezone
-from schools.models import School
+from django.core.exceptions import ValidationError
 from core.choices.communications import (
     NotificationCategoryChoices,
     NotificationPriorityChoices,
@@ -18,6 +17,7 @@ from core.choices.communications import (
     AnnouncementStatusChoices,
     MeetingStatusChoices
 )
+
 
 class Notification(models.Model):
     """Model representing notifications sent to users."""
@@ -73,6 +73,7 @@ class Feedback(models.Model):
     """Model representing feedback from users."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    school = models.ForeignKey("schools.School",on_delete=models.CASCADE,related_name="feedbacks",null=True,blank=True,)
     feedback_type = models.CharField(max_length=15, choices=FeedbackTypeChoices.choices)
     feedback_category = models.CharField(max_length=20, choices=FeedbackCategoryChoices.choices)
     submitted_by = models.ForeignKey("accounts.CustomUser",on_delete=models.CASCADE,related_name="feedback_submitted", )
@@ -103,6 +104,10 @@ class Feedback(models.Model):
             return f"Anonymous {self.feedback_type}: {self.title}"
         return f"{self.submitted_by} - {self.feedback_type}: {self.title}"
 
+    def save(self, *args, **kwargs):
+        if self.feedback_status == FeedbackStatusChoices.RESOLVED and not self.resolved_at:
+            self.resolved_at = timezone.now()
+        super().save(*args, **kwargs)
 
 class Announcement(models.Model):
     """Model representing school announcements."""
@@ -129,14 +134,18 @@ class Announcement(models.Model):
         ordering = ["-publish_date", "-priority"]
 
     def __str__(self):
-        return f"{self.title} ({self.school.code})"
+        return f"{self.title} ({self.school.school_code or self.school.school_name})"
+
+    def clean(self):
+        if self.expiry_date and self.publish_date and self.expiry_date <= self.publish_date:
+            raise ValidationError({"expiry_date": "Must be after publish date."})
 
 
 class ParentTeacherMeeting(models.Model):
     """Model representing parent-teacher meetings."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name="parent_teacher_meetings")
+    school = models.ForeignKey("schools.School", on_delete=models.CASCADE, related_name="parent_teacher_meetings")
     title = models.CharField(max_length=200)
     purpose = models.TextField()
     date = models.DateField()
@@ -159,3 +168,11 @@ class ParentTeacherMeeting(models.Model):
 
     def __str__(self):
         return f"{self.title} on {self.date}"
+
+    def clean(self):
+        super().clean()
+        if self.end_time and self.start_time and self.end_time <= self.start_time:
+            raise ValidationError({"end_time": "Must be after start time."})
+        if self.follow_up_date and self.date and self.follow_up_date < self.date:
+            raise ValidationError({"follow_up_date": "Must be on or after meeting date."})
+    

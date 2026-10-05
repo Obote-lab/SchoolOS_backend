@@ -1,7 +1,5 @@
-# welfare/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
-
 from .models import CounselingSession, DisciplineIncident, SickBayRecord, WellnessCheck
 
 
@@ -164,14 +162,16 @@ class SickBayRecordAdmin(admin.ModelAdmin):
 class CounselingSessionAdmin(admin.ModelAdmin):
     list_display = (
         "student",
-        "get_counseling_session_type_display",
+        # "get_counseling_session_type_display",
+        "session_type",
         "date",
         "duration_minutes",
         "counseling_status",
         "counselor",
     )
     list_filter = (
-        "get_counseling_session_type_display",
+        # "get_counseling_session_type_display",
+        "session_type",
         "counseling_status",
         "parent_involved",
         "referral_made",
@@ -188,7 +188,8 @@ class CounselingSessionAdmin(admin.ModelAdmin):
                     "student",
                     "school",
                     "counselor",
-                    "get_counseling_session_type_display",
+                    # "get_counseling_session_type_display",
+                    "session_type",
                     "date",
                     "duration_minutes",
                     "location",

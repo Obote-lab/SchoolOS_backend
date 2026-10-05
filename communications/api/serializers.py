@@ -7,9 +7,7 @@ class NotificationSerializer(serializers.ModelSerializer):
     """Serializer for Notification model."""
 
     user_name = serializers.CharField(source="user.get_full_name", read_only=True)
-    sender_name = serializers.CharField(
-        source="sender.get_full_name", read_only=True, allow_null=True
-    )
+    sender_name = serializers.CharField(source="sender.get_full_name", read_only=True, allow_null=True)
 
     class Meta:
         model = Notification
@@ -33,7 +31,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             "expires_at",
             "created_at",
         ]
-        read_only_fields = ["notification_id", "created_at"]
+        read_only_fields = ["notification_id", "created_at", "delivery_status"]
 
     def validate(self, data):
         """Custom validation for Notification."""
@@ -143,12 +141,33 @@ class FeedbackSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        """Set submitted_by to current user if not provided."""
-
-        if "submitted_by" not in validated_data:
-            validated_data["submitted_by"] = self.context["request"].user
-
+        request = self.context["request"]
+        validated_data["submitted_by"] = request.user
+        school = getattr(request, "school", None) or getattr(request.user, "school", None)
+        if school and hasattr(Feedback, "school"):
+            validated_data.setdefault("school", school)
         return super().create(validated_data)
+
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        if instance.anonymous:
+            is_staff = request and (
+                request.user.is_staff
+                or hasattr(request.user, "staff_profile")
+            )
+            if not is_staff or (request and request.user == instance.submitted_by):
+                # staff handlers may still see submitter; public list should not
+                pass
+            if not (request and getattr(request.user, "is_superuser", False)):
+                # simplest safe default for non-assignees:
+                if not (request and request.user_id in {
+                    instance.assigned_to_id, instance.resolved_by_id
+                }):
+                    data["submitted_by"] = None
+                    data["submitted_by_name"] = "Anonymous"
+        return data
 
 
 class AnnouncementSerializer(serializers.ModelSerializer):
@@ -221,13 +240,13 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        """Set created_by to current user if not provided."""
-
-        if "created_by" not in validated_data:
-            validated_data["created_by"] = self.context["request"].user
-
+        request = self.context["request"]
+        validated_data["created_by"] = request.user
+        school = getattr(request, "school", None) or validated_data.get("school")
+        if not school:
+            raise serializers.ValidationError({"school": "School context required."})
+        validated_data["school"] = school
         return super().create(validated_data)
-
 
 class ParentTeacherMeetingSerializer(serializers.ModelSerializer):
     """Serializer for ParentTeacherMeeting model."""
@@ -324,3 +343,6 @@ class FeedbackStatsSerializer(serializers.Serializer):
     avg_rating = serializers.FloatField()
     by_category = serializers.DictField()
     by_type = serializers.DictField()
+
+class MarkNotificationReadSerializer(serializers.Serializer):
+    acknowledgement_action = serializers.CharField(required=False, allow_blank=True)

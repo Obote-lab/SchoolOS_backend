@@ -5,7 +5,7 @@ Base settings shared by all environments.
 import os
 from datetime import timedelta
 from pathlib import Path
-
+from django.conf import settings
 from decouple import config, Csv
 
 # Paths
@@ -17,12 +17,10 @@ SECRET_KEY = config("SECRET_KEY")
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost", cast=Csv())
 
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGINS = config(
-    "CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv()
-)
-CSRF_TRUSTED_ORIGINS = config(
-    "CSRF_TRUSTED_ORIGINS", default="http://localhost:5173", cast=Csv()
-)
+CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="http://localhost:5173", cast=Csv())
+
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
 
 # Application definition
 DJANGO_APPS = [
@@ -62,6 +60,7 @@ DOMAIN_APPS = [
     "communications",
     "compliance",
     "dormitory",
+    "branding",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + DOMAIN_APPS
@@ -78,6 +77,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "schools.middleware.SchoolContextMiddleware",
+
+    # Add Rollbar as the LAST middleware
+    'rollbar.contrib.django.middleware.RollbarNotifierMiddleware',
 ]
 
 ROOT_URLCONF = "schoolOS.urls"
@@ -214,6 +216,15 @@ SPECTACULAR_SETTINGS = {
         {"name": "Roles", "description": "Role management"},
         {"name": "Permissions", "description": "Permission management"},
     ],
+    "ENUM_NAME_OVERRIDES": {
+    "GenderEnum": "core.choices.common.GenderChoices",
+    "NutritionQualityEnum": "core.choices.welfare.NutritionQualityChoices",
+    "StreamEnum": "core.choices.academic.SubjectSpecializationChoices",
+    "AttendanceSessionTypeEnum": "core.choices.attendance.SessionTypeChoices",
+    "CounselingSessionTypeEnum": "core.choices.welfare.CounselingSessionTypeChoices",
+    "BannerLevelChoices": "branding.models.BannerLevelChoices",
+    "LevelE02Enum": "branding.models.BannerLevelChoices",
+},
 }
 
 
@@ -260,3 +271,21 @@ DEFAULT_COUNTRY = config(
     default="KE"
 )
 PHONENUMBER_DB_FORMAT = "E164"
+
+
+# the Rollba Settings# settings.py
+ROLLBAR_ACCESS_TOKEN = config('ROLLBAR_ACCESS_TOKEN')
+ROLLBAR_ENVIRONMENT = config('ROLLBAR_ENVIRONMENT', 'development')
+
+
+
+ROLLBAR = {
+    'access_token': config('ROLLBAR_ACCESS_TOKEN'),
+    'environment': 'development',
+    'code_version': config('GIT_SHA', '1.0.0'),
+    'root': BASE_DIR,
+}
+
+print("DEBUG =", settings.DEBUG)
+print("MEDIA_ROOT =", settings.MEDIA_ROOT)
+print("MEDIA_URL =", settings.MEDIA_URL)

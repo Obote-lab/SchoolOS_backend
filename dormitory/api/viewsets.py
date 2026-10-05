@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
+from students.models import StudentProfile
 from ..models import Dormitory, DormitoryInspection, RoomAllocation
 from .serializers import (
     DormitoryDetailSerializer,

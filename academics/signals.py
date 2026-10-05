@@ -19,7 +19,7 @@ def _school_from_exam(exam: Exam):
 @receiver(post_save, sender=Exam)
 def audit_exam_lifecycle(sender, instance: Exam, created: bool, **kwargs):
     create_audit_log(
-        actor=None,  # set actor from service/view when you have request.user
+        actor=None,
         action=AuditActionChoices.CREATE if created else AuditActionChoices.UPDATE,
         model_name="Exam",
         record_id=instance.id,

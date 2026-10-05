@@ -5,6 +5,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from accounts.api.permissions import HasPermission
 from rest_framework.response import Response
 from django.db.models import Sum
 from students.models import StudentProfile
@@ -21,7 +22,12 @@ from core.choices.activities import (
     ActivityRoleChoices,
     StudentActivityStatusChoices,
 )
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
+from collections import defaultdict
 
+
+@extend_schema(tags=["Activities"])
 class ActivityViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing Activities.
@@ -35,7 +41,9 @@ class ActivityViewSet(viewsets.ModelViewSet):
 
     queryset = Activity.objects.all()
     serializer_class = ActivitySerializer
-    permission_classes = [IsAuthenticated]
+    # permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasPermission]
+    module = "activities"
     filter_backends = [
         DjangoFilterBackend,
         filters.SearchFilter,
@@ -60,13 +68,17 @@ class ActivityViewSet(viewsets.ModelViewSet):
             return Activity.objects.all()
 
         # If user has a school (staff)
-        if hasattr(user, "staff_profile"):
+        school = getattr(self.request, "school", None)
+        if school:
+            return Activity.objects.filter(school=school)
+        if hasattr(user, "staff_profile") and user.staff_profile.school_id:
             return Activity.objects.filter(school=user.staff_profile.school)
 
-        # If user is a student
+
         if hasattr(user, "student_profile"):
-            return Competition.objects.filter(
-                activity__school=user.student_profile.school
+            return Activity.objects.filter(
+                school=user.student_profile.school,
+                activity_status=ActivityStatusChoices.ACTIVE,
             )
 
         return Activity.objects.none()
@@ -78,9 +90,7 @@ class ActivityViewSet(viewsets.ModelViewSet):
 
         stats = {
             "total_activities": queryset.count(),
-            "active_activities": queryset.filter(
-                activity_status=ActivityStatusChoices.ACTIVE
-            ).count(),
+            "active_activities": queryset.filter(activity_status=ActivityStatusChoices.ACTIVE).count(),
             "total_participants": queryset.aggregate(total=Sum("current_participants"))[
                 "total"
             ]
@@ -155,12 +165,18 @@ class ActivityViewSet(viewsets.ModelViewSet):
         serializer = ActivitySerializer(available_activities, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=["post"])
+
+    @extend_schema(
+    request=StudentActivitySerializer,
+    responses={201: StudentActivitySerializer},
+    tags=["Activities"],)
+    @action(detail=True, methods=["post"], url_path="enroll-student")
     def enroll_student(self, request, pk=None):
         """Enroll a student in this activity."""
         activity = self.get_object()
         student_id = request.data.get("student_id")
-        role = request.data.get("role", StudentActivityStatusChoices.ACTIVE)
+        # role = request.data.get("role", StudentActivityStatusChoices.ACTIVE)
+        role = request.data.get("role", ActivityRoleChoices.MEMBER)
 
         if not student_id:
             return Response(
@@ -195,8 +211,13 @@ class ActivityViewSet(viewsets.ModelViewSet):
                 "start_date": request.data.get("start_date") or timezone.now().date(),
             }
         )
+
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        enrollment = serializer.save()
+        return Response(
+            StudentActivitySerializer(enrollment).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class StudentActivityViewSet(viewsets.ModelViewSet):
@@ -440,17 +461,19 @@ class CompetitionViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return Competition.objects.all()
 
-        # If user has a school (staff/student)
-        if hasattr(user, "staffprofile"):
-            school = user.staff_profile.school
+        school = getattr(self.request, "school", None)
+        if school:
             return Competition.objects.filter(activity__school=school)
-
-        # If user is a student
-        if hasattr(user, "studentprofile"):
-            student = user.student_profile
-            return Competition.objects.filter(activity__school=school)
-
+        if hasattr(user, "staff_profile") and user.staff_profile.school_id:
+            return Competition.objects.filter(
+                activity__school=user.staff_profile.school
+            )
+        if hasattr(user, "student_profile"):
+            return Competition.objects.filter(
+                activity__school=user.student_profile.school
+            )
         return Competition.objects.none()
+
 
     def perform_create(self, serializer):
         """Set the created_by user when creating a competition."""
@@ -560,13 +583,11 @@ class CompetitionViewSet(viewsets.ModelViewSet):
         else:
             competitions = Competition.objects.all()
 
-        # Group by school
-        from collections import defaultdict
-
         grouped = defaultdict(list)
 
         for comp in competitions.select_related("activity__school"):
-            school_name = comp.activity.school.name
+            # school_name = comp.activity.school.name
+            school_name = comp.activity.school.school_name
             serializer = self.get_serializer(comp)
             grouped[school_name].append(serializer.data)
 

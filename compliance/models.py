@@ -30,6 +30,7 @@ class SystemAuditEvent(models.Model):
     old_value = models.TextField(blank=True)
     new_value = models.TextField(blank=True)
     reason = models.TextField(blank=True)
+    record_id = models.CharField(max_length=64, blank=True, db_index=True)
     approval_required = models.BooleanField(default=False)
     approved_by = models.ForeignKey("accounts.CustomUser",on_delete=models.SET_NULL, null=True,blank=True,related_name="audit_approvals",)
     school = models.ForeignKey("schools.School", on_delete=models.SET_NULL,null=True,blank=True, related_name="audit_logs",)
@@ -127,8 +128,10 @@ class SystemHealth(models.Model):
                 self.performance_score = max(0, self.performance_score - 15)
 
             # Add warning if storage is low
-            if usage_percent > 90 and "low_storage" not in self.issues_detected:
-                self.issues_detected = list(self.issues_detected)
+            issues = list(self.issues_detected or [])
+            if usage_percent > 90 and "low_storage" not in issues:
+                issues.append("low_storage")
+                self.issues_detected = issues
 
         super().save(*args, **kwargs)
 

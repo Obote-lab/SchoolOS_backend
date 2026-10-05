@@ -3,7 +3,7 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions
 from core.choices import AccessLevelChoices
-from ..models import CustomUser, PermissionMatrix, Role, UserRole
+from ..models import CustomUser, PermissionMatrix, UserRole
 
 logger = logging.getLogger(__name__)
 

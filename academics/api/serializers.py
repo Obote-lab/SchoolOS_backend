@@ -612,60 +612,60 @@ class ContinuousAssessmentCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class BulkExamResultsUploadSerializer(serializers.Serializer):
-    exam = serializers.UUIDField()
-    subject = serializers.UUIDField()
-    results = serializers.ListField(child=serializers.DictField(),min_length=1,help_text="List of dicts: {'student_admission': str, 'marks': float, 'grade': str, 'remark': str}",)
+# class BulkExamResultsUploadSerializer(serializers.Serializer):
+#     exam = serializers.UUIDField()
+#     subject = serializers.UUIDField()
+#     results = serializers.ListField(child=serializers.DictField(),min_length=1,help_text="List of dicts: {'student_admission': str, 'marks': float, 'grade': str, 'remark': str}",)
 
-    @transaction.atomic
-    def create(self, validated_data):
-        request = self.context["request"]
-        user = request.user
-        school = user.school
+#     @transaction.atomic
+#     def create(self, validated_data):
+#         request = self.context["request"]
+#         user = request.user
+#         school = user.school
 
-        exam_id = validated_data["exam"]
-        subject_id = validated_data["subject"]
-        results_list = validated_data["results"]
+#         exam_id = validated_data["exam"]
+#         subject_id = validated_data["subject"]
+#         results_list = validated_data["results"]
 
-        created = []
-        errors = []
+#         created = []
+#         errors = []
 
-        for idx, row in enumerate(results_list, 1):
-            try:
-                admission = row.get("student_admission")
-                marks = float(row["marks"])
+#         for idx, row in enumerate(results_list, 1):
+#             try:
+#                 admission = row.get("student_admission")
+#                 marks = float(row["marks"])
 
-                student = StudentProfile.objects.select_related('user').get(
-                    admission_number=admission,
-                    school=school
-                )
+#                 student = StudentProfile.objects.select_related('user').get(
+#                     admission_number=admission,
+#                     school=school
+#                 )
 
-                result, was_created = ExamResult.objects.update_or_create(
-                    student=student,
-                    exam_id=exam_id,
-                    subject_id=subject_id,
-                    defaults={
-                        "marks": marks,
-                        "grade": row.get("grade", ""),
-                        "remark": row.get("remark", ""),
-                        "marked_by": user,
-                        "marking_date": timezone.now(),
-                    },
-                )
-                created.append({
-                    "row": idx,
-                    "student": admission,
-                    "marks": marks,
-                    "result_id": str(result.id),
-                    "created": was_created,
-                })
-            except StudentProfile.DoesNotExist:
-                errors.append({"row": idx, "error": f"Student {admission} not found in school"})
-            except ValueError as ve:
-                errors.append({"row": idx, "error": f"Invalid marks: {ve}"})
-            except Exception as e:
-                errors.append({"row": idx, "error": str(e)})
-        return {"created": created, "errors": errors}
+#                 result, was_created = ExamResult.objects.update_or_create(
+#                     student=student,
+#                     exam_id=exam_id,
+#                     subject_id=subject_id,
+#                     defaults={
+#                         "marks": marks,
+#                         "grade": row.get("grade", ""),
+#                         "remark": row.get("remark", ""),
+#                         "marked_by": user,
+#                         "marking_date": timezone.now(),
+#                     },
+#                 )
+#                 created.append({
+#                     "row": idx,
+#                     "student": admission,
+#                     "marks": marks,
+#                     "result_id": str(result.id),
+#                     "created": was_created,
+#                 })
+#             except StudentProfile.DoesNotExist:
+#                 errors.append({"row": idx, "error": f"Student {admission} not found in school"})
+#             except ValueError as ve:
+#                 errors.append({"row": idx, "error": f"Invalid marks: {ve}"})
+#             except Exception as e:
+#                 errors.append({"row": idx, "error": str(e)})
+#         return {"created": created, "errors": errors}
 
 
 class GradingSystemSerializer(serializers.ModelSerializer):

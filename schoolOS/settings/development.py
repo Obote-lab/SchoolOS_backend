@@ -40,3 +40,4 @@ LOGGING = {
 
 # Optional: use console email backend in pure local dev
 # EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")

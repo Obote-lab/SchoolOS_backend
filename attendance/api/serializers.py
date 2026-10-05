@@ -279,7 +279,6 @@ class AttendanceRecordWriteSerializer(serializers.ModelSerializer):
 #  Bulk Operations
 class BulkAttendanceItemSerializer(serializers.Serializer):
     student = serializers.UUIDField()
-    student = serializers.IntegerField()
     attendance_record_status = serializers.ChoiceField(choices=AttendanceRecordStatusChoices.choices)
     check_in_time = serializers.DateTimeField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True)

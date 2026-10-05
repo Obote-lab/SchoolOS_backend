@@ -77,6 +77,7 @@ dependencies = [
     { name = "pipreqs" },
     { name = "psycopg2-binary" },
     { name = "python-decouple" },
+    { name = "rollbar" },
     { name = "shortuuid" },
     { name = "whitenoise" },
 ]
@@ -100,6 +101,7 @@ requires-dist = [
     { name = "pipreqs", specifier = ">=0.5.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.11" },
     { name = "python-decouple", specifier = ">=3.8" },
+    { name = "rollbar", specifier = ">=1.4.0" },
     { name = "shortuuid", specifier = ">=1.0.13" },
     { name = "whitenoise", specifier = ">=6.11.0" },
 ]
@@ -1339,6 +1341,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
+]
+
+[[package]]
+name = "rollbar"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/3f/92e8c728e42aba86db5f8d6e2e9c23926b2d8df81a02cdcab0c044e285e9/rollbar-1.4.0.tar.gz", hash = "sha256:98ad7f90012c791d0b40eac51b6fe688b1cadcc4aadff772fc0a23efe75fb5fc", size = 94401, upload-time = "2026-07-10T16:32:15.518Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/0b/383e2a843722a256406edaae37561ff124af6633369920bef6ea3daa1678/rollbar-1.4.0-py3-none-any.whl", hash = "sha256:4f5c183ce1cdc6316a2a675f887a6ccead3f9b5da35b8d6c4ad7a7c2904c602d", size = 126652, upload-time = "2026-07-10T16:32:14.289Z" },
 ]
 
 [[package]]

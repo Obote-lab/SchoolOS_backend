@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from core.audit import create_audit_log
 from core.choices.identity import AuditActionChoices
-from ..models import AuditLog, CustomUser
+from ..models import CustomUser
 from ..utils import generate_password_reset_token, validate_password_reset_token
 from .email_service import EmailService
 

@@ -96,7 +96,7 @@ class StaffProfile(models.Model):
                 {"date_employed": _("Employment date cannot be in the future.")}
             )
         if self.department and self.school:
-            if self.department.school_id != self.school:
+            if self.department.school_id != self.school_id:
                 raise ValidationError(
                     {"department": _("Department must belong to the same school.")}
                 )

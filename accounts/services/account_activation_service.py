@@ -1,7 +1,7 @@
 import logging
 from django.db import transaction
 from core.choices.identity import AuditActionChoices
-from ..models import AuditLog, CustomUser
+from ..models import CustomUser
 from ..utils import (
     generate_account_activation_token,
     validate_account_activation_token,

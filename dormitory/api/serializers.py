@@ -1,7 +1,8 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from ..models import Dormitory, DormitoryInspection, RoomAllocation
-from  core.choices.dormitory import DormTypeChoices, DormStatusChoices
+from  core.choices.dormitory import DormTypeChoices
+from core.choices.common import GenderChoices
 
 class DormitoryListSerializer(serializers.ModelSerializer):
     occupancy_percentage = serializers.SerializerMethodField()
@@ -75,11 +76,20 @@ class RoomAllocationSerializer(serializers.ModelSerializer):
         dorm = data.get("dormitory") or getattr(self.instance, "dormitory", None)
 
         if student and dorm:
-            if student.school != dorm.school:
+            # if student.school != dorm.school:
+            if student.school_id != dorm.school_id:
                 raise serializers.ValidationError("Student must belong to the dormitory's school.")
-            if dorm.dorm_type == DormTypeChoices.BOYS and student.gender not in ("male", "M"):
+            if dorm.dorm_type == DormTypeChoices.BOYS and student.gender not in GenderChoices.MALE:
                 raise serializers.ValidationError("Boys dormitory only for male students.")
-            if dorm.dorm_type == DormTypeChoices.GIRLS and student.gender not in ("female", "F"):
+            if dorm.dorm_type == DormTypeChoices.GIRLS and student.gender not in GenderChoices.FEMALE:
                 raise serializers.ValidationError("Girls dormitory only for female students.")
+
+
+            if dorm and (data.get("is_active", True)):
+                if dorm.current_occupancy >= dorm.capacity:
+                    # if updating existing active row, skip or recount excluding self
+                    raise serializers.ValidationError(
+                        {"dormitory": "Dormitory is at capacity."}
+                    )
 
         return data

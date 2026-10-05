@@ -1,6 +1,12 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from ..models import SystemAuditEvent, ComplianceCheck, DataExportLog, SystemHealth,SystemAuditEvent
+# from ..models import SystemAuditEvent, ComplianceCheck, DataExportLog, SystemHealth,SystemAuditEvent
+from ..models import (
+    ComplianceCheck,
+    DataExportLog,
+    SystemAuditEvent,
+    SystemHealth,
+)
 from core.choices.compliance import ExportTypeChoices
 
 
@@ -28,6 +34,7 @@ class SystemAuditEventSerializer(serializers.ModelSerializer):
             "action_type",
             "content_type",
             "object_id",
+            "record_id",
             "content_object",
             "model_name",
             "field_changed",
@@ -76,6 +83,7 @@ class DataExportLogSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["created_at"]
 
+    @extend_schema_field(float)
     def get_file_size_mb(self, obj) -> float:
         """Convert bytes to megabytes."""
         if obj.file_size:
@@ -128,10 +136,12 @@ class SystemHealthSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["check_timestamp"]
 
+    @extend_schema_field(int)
     def get_storage_total(self, obj) -> int:
         """Calculate total storage."""
         return obj.storage_used + obj.storage_available
 
+    @extend_schema_field(float)
     def get_storage_usage_percent(self, obj) -> float:
         """Calculate storage usage percentage."""
         total = self.get_storage_total(obj)
@@ -243,6 +253,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "action_type",
             "content_type",
             "object_id",
+            "record_id",
             "content_object",
             "model_name",
             "field_changed",

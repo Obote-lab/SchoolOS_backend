@@ -141,8 +141,6 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return f"{self.login_id} ({self.get_full_name() or self.phone})"
 
-    # def get_highest_tier(self):
-    #     return self.user_roles.filter(is_active=True).order_by('role__permissions_tier').first()
     def get_highest_tier(self):
         role_assignment = self.user_roles.filter(is_active=True).order_by('role__permissions_tier').first()
         return role_assignment.role if role_assignment else None
@@ -445,7 +443,7 @@ class PermissionMatrix(models.Model):
 
 class AuditLog(models.Model):
     """
-    Tamper-proof audit trail - Blueprint page 23-24
+    Tamper-proof audit trail
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -40,6 +40,7 @@ urlpatterns = [
     path("api/v1/communications/", include("communications.urls")),
     path("api/v1/compliance/", include("compliance.urls")),
     path("api/v1/dormitory/", include("dormitory.urls")),
+    path("api/v1/branding/", include("branding.urls")),
     path("api/auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/",SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui",),
@@ -47,3 +48,4 @@ urlpatterns = [
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

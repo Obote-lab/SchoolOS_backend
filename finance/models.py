@@ -18,6 +18,16 @@ from core.choices.finance import (
 
 # CustomUser = get_user_model()
 
+
+def _school_code(school) -> str:
+    if not school:
+        return "SCH"
+    return (
+        getattr(school, "school_code", None)
+        or getattr(school, "system_school_code", None)
+        or "SCH"
+    )
+
 class FeeStructure(models.Model):
     """Defines fee items per class/term/category."""
 
@@ -57,21 +67,23 @@ class FeeStructure(models.Model):
         return f"{self.class_level} – {self.get_fees_category_display()} – KES {self.amount}"
 
     def clean(self):
-        if self.expires_on and self.expires_on <= self.effective_from:
-            raise ValidationError(
-                {"expires_on": _("Expiry must be after effective date.")}
-            )
-
-        if self.due_date < self.effective_from:
-            raise ValidationError(
-                {"due_date": _("Due date cannot be before effective date.")}
-            )
+        super().clean()
+        if self.expires_on and self.effective_from and self.expires_on <= self.effective_from:
+            raise ValidationError({"expires_on": _("Expiry must be after effective date.")})
+        if self.due_date and self.effective_from and self.due_date < self.effective_from:
+            raise ValidationError({"due_date": _("Due date cannot be before effective date.")})
+        if self.term_id and self.academic_year_id:
+            if self.term.academic_year_id != self.academic_year_id:
+                raise ValidationError({"term": _("Term must belong to the academic year.")})
+        if self.academic_year_id and self.school_id:
+            if self.academic_year.school_id != self.school_id:
+                raise ValidationError({"academic_year": _("Academic year must belong to this school.")})
 
     def save(self, *args, **kwargs):
-        if self.fees_status == FeesStatusChoices.APPROVED and not self.approved_by:
-            self.approved_by = self.created_by  # auto-approve if creator is authorized
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
         super().save(*args, **kwargs)
-
 
 class FeeInvoice(models.Model):
     """Individual student invoice per term."""
@@ -113,46 +125,76 @@ class FeeInvoice(models.Model):
         return f"{self.invoice_number} – {self.student.admission_number}"
 
     def clean(self):
-        if self.due_date < self.issue_date:
+        super().clean()
+        if self.due_date and self.issue_date and self.due_date < self.issue_date:
             raise ValidationError(
                 {"due_date": _("Due date cannot be before issue date.")}
             )
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
+        if self.academic_year_id and self.school_id:
+            if self.academic_year.school_id != self.school_id:
+                raise ValidationError(
+                    {"academic_year": _("Year must belong to this school.")}
+                )
+        if self.term_id and self.academic_year_id:
+            if self.term.academic_year_id != self.academic_year_id:
+                raise ValidationError(
+                    {"term": _("Term must belong to the academic year.")}
+                )
 
     def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+
         if not self.invoice_number:
             with transaction.atomic():
                 year = timezone.now().year
+                code = _school_code(self.school)
+                prefix = f"INV/{code}/{year}/"
                 last = (
                     FeeInvoice.objects.select_for_update()
-                    .filter(
-                        invoice_number__startswith=f"INV/{self.school.code}/{year}/"
-                    )
+                    .filter(invoice_number__startswith=prefix)
                     .order_by("-invoice_number")
                     .first()
                 )
                 num = int(last.invoice_number.split("/")[-1]) + 1 if last else 1
-                self.invoice_number = f"INV/{self.school.code}/{year}/{num:04d}"
+                self.invoice_number = f"{prefix}{num:04d}"
 
-        # Recalculate totals
         self.net_payable = (
-            self.total_amount
-            + self.previous_balance
-            + self.late_fee_accrued
-            - self.waiver_amount
-            - self.bursary_amount
+            (self.total_amount or Decimal("0"))
+            + (self.previous_balance or Decimal("0"))
+            + (self.late_fee_accrued or Decimal("0"))
+            - (self.waiver_amount or Decimal("0"))
+            - (self.bursary_amount or Decimal("0"))
         )
-        self.balance = max(Decimal(0), self.net_payable - self.amount_paid)
+        self.balance = max(Decimal("0"), self.net_payable - (self.amount_paid or Decimal("0")))
 
-        # Auto-status
-        if self.balance <= 0:
-            self.invoice_status = InvoiceStatusChoices.PAID
-        elif self.amount_paid > 0:
-            self.invoice_status = InvoiceStatusChoices.PARTIALLY_PAID
-        elif self.due_date < timezone.now().date():
-            self.invoice_status = InvoiceStatusChoices.OVERDUE
-        else:
-            self.invoice_status = InvoiceStatusChoices.ISSUED
+        # Status: never force out of DRAFT here
+        if self.invoice_status != InvoiceStatusChoices.DRAFT:
+            if self.balance <= 0 and self.net_payable >= 0:
+                self.invoice_status = InvoiceStatusChoices.PAID
+            elif (self.amount_paid or 0) > 0:
+                self.invoice_status = InvoiceStatusChoices.PARTIALLY_PAID
+            elif self.due_date and self.due_date < timezone.now().date():
+                self.invoice_status = InvoiceStatusChoices.OVERDUE
+            elif self.invoice_status not in (
+                InvoiceStatusChoices.CANCELLED,
+                InvoiceStatusChoices.VOID,
+            ):
+                # keep CANCELLED/VOID; otherwise ensure issued-like status stays sensible
+                if self.invoice_status not in (
+                    InvoiceStatusChoices.ISSUED,
+                    InvoiceStatusChoices.PARTIALLY_PAID,
+                    InvoiceStatusChoices.OVERDUE,
+                    InvoiceStatusChoices.PAID,
+                ):
+                    self.invoice_status = InvoiceStatusChoices.ISSUED
 
+        if validate:
+            self.full_clean()
         super().save(*args, **kwargs)
 
 
@@ -172,6 +214,7 @@ class Payment(models.Model):
     mpesa_receipt = models.CharField(max_length=50, blank=True)
     bank_ref = models.CharField(max_length=100, blank=True)
     cheque_no = models.CharField(max_length=50, blank=True)
+    ledger_posted = models.BooleanField(default=False)
     payment_status = models.CharField(max_length=20, choices=PaymentStatusChoices.choices, default=PaymentStatusChoices.PENDING)
     reversal_reason = models.TextField(blank=True)
     receipt_number = models.CharField(max_length=50, blank=True)
@@ -191,27 +234,45 @@ class Payment(models.Model):
         return f"{self.payment_reference} – KES {self.amount}"
 
     def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+
         if not self.payment_reference:
             with transaction.atomic():
                 year = timezone.now().year
-                prefix = {"mpesa": "MP", "cash": "CSH", "bank_transfer": "BT"}.get(
-                    self.method, "PAY"
-                )
+                code = _school_code(self.school)
+                prefix_map = {
+                    PaymentMethodChoices.MPESA: "MP",
+                    PaymentMethodChoices.CASH: "CSH",
+                    PaymentMethodChoices.BANK_TRANSFER: "BT",
+                }
+                prefix = prefix_map.get(self.method, "PAY")
+                base = f"{prefix}/{code}/{year}/"
                 last = (
                     Payment.objects.select_for_update()
-                    .filter(
-                        payment_reference__startswith=f"{prefix}/{self.school.code}/{year}/"
-                    )
+                    .filter(payment_reference__startswith=base)
                     .order_by("-payment_reference")
                     .first()
                 )
                 num = int(last.payment_reference.split("/")[-1]) + 1 if last else 1
-                self.payment_reference = f"{prefix}/{self.school.code}/{year}/{num:05d}"
+                self.payment_reference = f"{base}{num:05d}"
 
-        if self.payment_status == PaymentStatusChoices.COMPLETED and not self.verified_by:
-            self.verified_by = self.received_by
-
+        if validate:
+            self.full_clean()
         super().save(*args, **kwargs)
+
+
+    def clean(self):
+        super().clean()
+        if self.invoice_id and self.student_id:
+            if self.invoice.student_id != self.student_id:
+                raise ValidationError(
+                    {"student": _("Must match invoice student.")}
+                )
+        if self.invoice_id and self.school_id:
+            if self.invoice.school_id != self.school_id:
+                raise ValidationError(
+                    {"school": _("Must match invoice school.")}
+                )
 
 
 class PaymentPlan(models.Model):
@@ -244,26 +305,38 @@ class PaymentPlan(models.Model):
         return f"{self.student.admission_number} – {self.term.name} Plan"
 
     def save(self, *args, **kwargs):
-        if self.installment_count > 0 and not self.installment_amount:
-            self.installment_amount = self.total_amount / self.installment_count
-
-        if not self.next_due_date:
+        validate = kwargs.pop("validate", True)
+        if self.installment_count and self.total_amount is not None:
+            if not self.installment_amount:
+                self.installment_amount = (
+                    self.total_amount / Decimal(self.installment_count)
+                ).quantize(Decimal("0.01"))
+        if not self.next_due_date and self.start_date:
             self.next_due_date = self.start_date
-
+        if validate:
+            self.full_clean()
         super().save(*args, **kwargs)
 
-    def get_status_display(self):
-        """Get human-readable status"""
-        return dict(PaymentPlanStatusChoices.choices).get(self.status, self.status)
+    def clean(self):
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
 
-    # FIXED: Add property for backward compatibility
-    @property
-    def payment_plan_status(self):
-        return self.status
+        def get_status_display(self):
+            """Get human-readable status"""
+            return dict(PaymentPlanStatusChoices.choices).get(self.status, self.status)
 
-    @payment_plan_status.setter
-    def payment_plan_status(self, value):
-        self.status = value
+        # FIXED: Add property for backward compatibility
+        @property
+        def payment_plan_status(self):
+            return self.status
+
+        @payment_plan_status.setter
+        def payment_plan_status(self, value):
+            self.status = value
 
 
 class Bursary(models.Model):
@@ -284,9 +357,10 @@ class Bursary(models.Model):
     bursary_status = models.CharField(max_length=20, choices=BursaryStatusChoices.choices, default=BursaryStatusChoices.APPLIED)
     renewable = models.BooleanField(default=False)
     next_review_date = models.DateField(null=True, blank=True)
-
+    applied_to_invoice = models.ForeignKey("FeeInvoice",on_delete=models.SET_NULL,null=True,blank=True,related_name="bursaries_applied",)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
 
     class Meta:
         ordering = ["-application_date"]
@@ -297,7 +371,13 @@ class Bursary(models.Model):
     def __str__(self):
         return f"{self.student.admission_number} – {self.get_source_display()} – {self.amount_awarded}"
 
-
+    def clean(self):
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
 class FinancialTransaction(models.Model):
     """General ledger transactions"""
 

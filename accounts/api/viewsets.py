@@ -3,13 +3,14 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from rest_framework import generics, permissions, status, viewsets
+from rest_framework import generics, permissions, request, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from core.choices import AuditActionChoices
+
+from core.choices.identity import AuditActionChoices
 from schools.models import School
 from ..models import CustomUser, PermissionMatrix, Role, UserRole
 from ..services.account_activation_service import AccountActivationService
@@ -385,10 +386,14 @@ class UserRoleViewSet(viewsets.ModelViewSet):
         ser = TransferSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
+
+        from schools.models import School
+        new_school = get_object_or_404(School, id=data["new_school_id"])
+
         assignments = RoleAssignmentService.transfer_user(
             actor=request.user,
             target_user=data["user_id"],
-            new_school=data["new_school_id"],
+            new_school=new_school,
         )
         return Response(self.get_serializer(assignments, many=True).data)
 
@@ -514,8 +519,6 @@ class PasswordResetRequestView(generics.GenericAPIView):
     )
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={"request": request})
-        # serializer.is_valid(raise_exception=True)
-        # serializer.save()
         try:
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -524,8 +527,6 @@ class PasswordResetRequestView(generics.GenericAPIView):
         return Response(
             {"message": "If the account exists, password reset instructions have been sent."}
         )
-
-
 
 class PasswordResetConfirmView(generics.GenericAPIView):
     serializer_class = PasswordResetConfirmSerializer

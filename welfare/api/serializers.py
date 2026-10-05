@@ -106,7 +106,8 @@ class CounselingSessionDetailSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.user.get_full_name", read_only=True)
     student_admission = serializers.CharField(source="student.admission_number", read_only=True)
     counselor_name = serializers.CharField(source="counselor.get_full_name", read_only=True)
-    session_type_display = serializers.CharField(source="get_counseling_session_type_display", read_only=True)
+    # session_type_display = serializers.CharField(source="get_counseling_session_type_display", read_only=True)
+    session_type_display = serializers.CharField(source="get_session_type_display", read_only=True)
     status_display = serializers.CharField(source="get_counseling_status_display", read_only=True)
 
     class Meta:
@@ -157,13 +158,14 @@ class DisciplineIncidentCreateSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
-        request = self.context.get("request")
+        request = self.context["request"]
         student = validated_data["student"]
-        if request and request.user.is_authenticated:
-            validated_data["reported_by"] = request.user
-        validated_data["school"] = (
-            getattr(request, "school", None) or student.school
-        )
+        school = getattr(request, "school", None) or student.school
+        if student.school_id != school.id:
+            raise serializers.ValidationError(
+                {"student": "Student does not belong to this school."}
+            )
+        validated_data["school"] = school
         return super().create(validated_data)
 
 class SickBayRecordCreateSerializer(serializers.ModelSerializer):
@@ -204,7 +206,9 @@ class CounselingSessionCreateSerializer(serializers.ModelSerializer):
         model = CounselingSession
         fields = [
             "student",
-            "counseling_session_type",
+            # "counseling_session_type",
+            # "get_counseling_session_type_display",
+            "session_type",
             "date",
             "duration_minutes",
             "location",
@@ -310,7 +314,7 @@ class WelfareStatisticsSerializer(serializers.Serializer):
             "contagious_cases": sick_records.filter(is_contagious=True).count(),
             "hospital_referrals": sick_records.filter(referred_to_hospital=True).count(),
             "total_counseling_sessions": sessions.count(),
-            "sessions_by_type": sessions.values("counseling_session_type").annotate(count=models.Count("id")),
+            "sessions_by_type": sessions.values("session_type").annotate(count=models.Count("id")),
             "total_wellness_checks": wellness_checks.count(),
             "average_wellness_score": wellness_checks.aggregate(
                 avg=models.Avg(

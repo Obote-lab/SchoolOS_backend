@@ -24,14 +24,6 @@ def publish(event: DomainEvent):
         handler(event)
 
 
-# def publish(event: DomainEvent, async_dispatch: bool = False):
-#     persist_event(event)
-
-#     if async_dispatch:
-#         dispatch_event.delay(event.to_dict())
-#     else:
-#         _dispatch_sync(event)
-
 
 def get_handlers(event_type: str) -> List[Callable]:
     return _handlers.get(event_type, [])

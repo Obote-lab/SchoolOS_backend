@@ -6,7 +6,6 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from common.choices import StressLevelChoices
 from core.choices.welfare import (
     DisciplineCategoryChoices,
     DisciplineSeverityChoices,
@@ -70,28 +69,34 @@ class DisciplineIncident(models.Model):
         if not self.incident_code:
             with transaction.atomic():
                 year = timezone.now().year
-                last_incident = (
+                prefix = f"DISC/{year}/"
+                last = (
                     DisciplineIncident.objects.select_for_update()
-                    .filter(incident_code__startswith=f"DISC/{year}/")
-                    .order_by("incident_code")
-                    .last()
+                    .filter(incident_code__startswith=prefix)
+                    .order_by("-incident_code")
+                    .first()
                 )
-            if last_incident:
-                last_number = int(last_incident.incident_code.split("/")[-1])
-                new_number = last_number + 1
-            else:
-                new_number = 1
+                n = int(last.incident_code.split("/")[-1]) + 1 if last else 1
+                self.incident_code = f"{prefix}{n:03d}"
 
-            self.incident_code = f"DISC/{year}/{new_number:03d}"
+            # Auto-set resolution date if status is resolved
+            if (
+                    self.discipline_status == DisciplineStatusChoices.RESOLVED
+                    and not self.resolution_date
+                ):
+                self.resolution_date = timezone.now().date()
 
-        # Auto-set resolution date if status is resolved
-        if (
-                self.discipline_status == DisciplineStatusChoices.RESOLVED
-                and not self.resolution_date
-            ):
-            self.resolution_date = timezone.now().date()
+            super().save(*args, **kwargs)
 
-        super().save(*args, **kwargs)
+
+    # DisciplineIncident / SickBay / Counseling / Wellness
+    def clean(self):
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
 
 
 class SickBayRecord(models.Model):
@@ -137,24 +142,24 @@ class SickBayRecord(models.Model):
     def __str__(self):
         return f"{self.student.admission_number} - {self.date.date()}"
 
+    # DisciplineIncident / SickBay / Counseling / Wellness
     def clean(self):
-        """Validate sick bay record"""
-        if self.isolation_end_date and self.isolation_end_date < self.date.date():
-            raise ValidationError(
-                {"isolation_end_date": "Isolation end date cannot be before visit date"}
-            )
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
 
 
 class CounselingSession(models.Model):
     """Counseling session records"""
 
-
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     student = models.ForeignKey("students.StudentProfile", on_delete=models.CASCADE)
     school = models.ForeignKey("schools.School", on_delete=models.CASCADE)
     counselor = models.ForeignKey( "accounts.CustomUser", on_delete=models.CASCADE, related_name="counseling_sessions" )
-    get_counseling_session_type_display = models.CharField(max_length=20, choices=CounselingSessionTypeChoices.choices )
+    session_type = models.CharField(max_length=20, choices=CounselingSessionTypeChoices.choices )
     date = models.DateTimeField()
     duration_minutes = models.PositiveIntegerField(default=30)
     location = models.CharField(max_length=200)
@@ -177,14 +182,21 @@ class CounselingSession(models.Model):
         verbose_name_plural = _("Counseling Sessions")
         indexes = [
             models.Index(fields=["student", "date"]),
-            models.Index(fields=["counselor", "get_counseling_session_type_display"]),
+            models.Index(fields=["counselor", "session_type"]),
             models.Index(fields=["counseling_status"]),
         ]
 
     def __str__(self):
-        return f"{self.student.admission_number} - {self.get_counseling_session_type_display()} - {self.date.date()}"
+        return f"{self.student.admission_number} - {self.get_session_type_display()} - {self.date.date()}"
 
-
+    # DisciplineIncident / SickBay / Counseling / Wellness
+    def clean(self):
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )
 class WellnessCheck(models.Model):
     """Student wellness assessment records"""
 
@@ -247,3 +259,12 @@ class WellnessCheck(models.Model):
             else:
                 return "Poor"
         return None
+
+    # DisciplineIncident / SickBay / Counseling / Wellness
+    def clean(self):
+        super().clean()
+        if self.student_id and self.school_id:
+            if self.student.school_id != self.school_id:
+                raise ValidationError(
+                    {"student": _("Student must belong to this school.")}
+                )

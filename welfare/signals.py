@@ -5,6 +5,8 @@ from django.utils import timezone
 from datetime import timedelta
 from .models import CounselingSession, DisciplineIncident, SickBayRecord, WellnessCheck
 from core.choices.common import StressLevelChoices
+from core.audit import create_audit_log
+from core.choices.identity import AuditActionChoices
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,15 @@ def set_medical_defaults(sender, instance, **kwargs):
         instance.isolation_end_date = instance.date.date() + timedelta(days=3)
 
     # Auto notify parent for serious cases
+    # if instance.referred_to_hospital or instance.isolation_required:
+    #     instance.parent_notified = True
+    # leave parent_notified False
     if instance.referred_to_hospital or instance.isolation_required:
-        instance.parent_notified = True
+        logger.info(
+            "Parent notification needed for sick bay %s (student %s)",
+            instance.pk,
+            instance.student_id,
+        )
 
 
 @receiver(post_save, sender=SickBayRecord)
@@ -91,3 +100,18 @@ def flag_critical_wellness(sender, instance, created, **kwargs):
             logger.warning(f"LOW WELLNESS SCORE: {instance.student.admission_number} ({overall})")
     except Exception as e:
         logger.error(f"Wellness flagging failed: {e}")
+
+
+@receiver(post_save, sender=DisciplineIncident)
+def audit_discipline_create(sender, instance, created, **kwargs):
+    if not created:
+        return
+    create_audit_log(
+        actor=instance.reported_by,
+        action=AuditActionChoices.CREATE,
+        model_name="DisciplineIncident",
+        record_id=instance.id,
+        school=instance.school,
+        reason=f"Incident {instance.incident_code}",
+        new_value=instance.discipline_category,
+    )

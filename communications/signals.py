@@ -1,7 +1,8 @@
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
-from accounts.models import AuditLog
+from core.audit import create_audit_log
+from core.choices.identity import AuditActionChoices
 from core.choices.communications import (
     AnnouncementStatusChoices,
     FeedbackPriorityChoices,
@@ -120,16 +121,16 @@ def send_meeting_invites(sender, instance, created, **kwargs):
 @receiver(post_save, sender=Feedback)
 def log_feedback_resolution(sender, instance, created, **kwargs):
     if not created and instance.feedback_status == FeedbackStatusChoices.RESOLVED:
-        AuditLog.objects.create(
-            user=instance.resolved_by,
-            action_type="UPDATE",
-            model_name="Feedback",
-            record_id=instance.id,
-            new_value=f"Resolved: {instance.title}",
-            reason="Feedback resolution recorded",
-            school_id=(
-                instance.related_to_student.school_id
-                if instance.related_to_student
-                else None
-            ),
-        )
+            create_audit_log(
+                actor=instance.resolved_by,
+                action=AuditActionChoices.UPDATE,
+                model_name="Feedback",
+                record_id=instance.id,
+                school=(
+                    instance.related_to_student.school
+                    if instance.related_to_student_id
+                    else getattr(instance, "school", None)
+                ),
+                reason="Feedback resolution recorded",
+                new_value=f"Resolved: {instance.title}",
+            )

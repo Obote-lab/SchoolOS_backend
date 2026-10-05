@@ -11,6 +11,7 @@ from core.choices.activities import (
     PotentialLevelChoices,
     CompetitionLevelChoices,
 )
+from django.core.exceptions import ValidationError
 
 class Activity(models.Model):
     """Model representing a co-curricular activity in the school."""
@@ -52,6 +53,16 @@ class Activity(models.Model):
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
 
+    def clean(self):
+        super().clean()
+        if self.teacher_in_charge_id and self.school_id:
+            # optional: staff must be in same school via staff_profile
+            pass
+        if self.budget_used > self.budget_allocated and self.budget_allocated > 0:
+            raise ValidationError(
+                {"budget_used": "Cannot exceed allocated budget."}
+            )
+
 
 class StudentActivity(models.Model):
     """Model representing a student's participation in an activity."""
@@ -89,6 +100,26 @@ class StudentActivity(models.Model):
         if self.activity:
             self.activity.save()
 
+    def clean(self):
+        super().clean()
+        if self.activity_id and self.student_id:
+            if self.student.school_id != self.activity.school_id:
+                raise ValidationError(
+                    {"student": "Student must belong to the activity's school."}
+                )
+        if (
+            self.student_activity_status == StudentActivityStatusChoices.ACTIVE
+            and self.activity_id
+            and not self.pk
+        ):
+            active = self.activity.participants.filter(
+                student_activity_status=StudentActivityStatusChoices.ACTIVE
+            ).count()
+            if active >= self.activity.max_participants:
+                raise ValidationError(
+                    {"activity": "Activity is at maximum capacity."}
+                )
+
 
 class Competition(models.Model):
     """Model representing a competition/event related to an activity."""
@@ -116,3 +147,9 @@ class Competition(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.activity.name})"
+
+    def clean(self):
+        if self.next_competition and self.date and self.next_competition < self.date:
+            raise ValidationError(
+                {"next_competition": "Must be on or after competition date."}
+            )

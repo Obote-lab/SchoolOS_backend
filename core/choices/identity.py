@@ -29,6 +29,7 @@ class ModuleChoices(models.TextChoices):
     REPORTS = "reports", _("Reports & Analytics")
     ORGANIZATION = "organization", _("Organization")
     IDENTITY = "identity", _("Identity & Access")
+    BRANDING = "branding", _("Branding")
 
 
 class ActionChoices(models.TextChoices):

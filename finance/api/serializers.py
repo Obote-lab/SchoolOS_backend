@@ -15,6 +15,9 @@ from core.choices.finance import (
     PaymentPlanStatusChoices,
     PaymentStatusChoices,
 )
+from schools.models import AcademicYear, Term
+from students.models import StudentProfile
+
 
 class FeeStructureSerializer(serializers.ModelSerializer):
     class Meta:
@@ -153,6 +156,7 @@ class FeeInvoiceCreateSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         validated_data["created_by"] = request.user
         validated_data["issue_date"] = timezone.now().date()
+        validated_data["school"] = validated_data["student"].school
         return super().create(validated_data)
 
 #  ACTION SERIALIZERS
@@ -177,7 +181,8 @@ class RecordPaymentSerializer(serializers.Serializer):
             bank_ref=validated_data.get("bank_transaction_ref", ""),
             received_by=request.user,
             paid_at=timezone.now(),
-            payment_status=PaymentStatusChoices.COMPLETED,
+            # payment_status=PaymentStatusChoices.COMPLETED,
+            payment_status=PaymentStatusChoices.PENDING
         )
         return payment
 
@@ -198,104 +203,91 @@ class GenerateInvoiceSerializer(serializers.Serializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        from schools.models import AcademicYear, Term
-        from students.models import StudentProfile
+        request = self.context["request"]
+        school = getattr(request, "school", None)
 
         student = StudentProfile.objects.get(id=validated_data["student_id"])
+        if school and student.school_id != school.id:
+            raise serializers.ValidationError("Student not in this school.")
+
         term = Term.objects.get(id=validated_data["term_id"])
         academic_year = AcademicYear.objects.get(id=validated_data["academic_year_id"])
 
-        # Get fee structures for student's class
+        # Match FeesStatusChoices value exactly (e.g. APPROVED not "active")
         fee_structures = FeeStructure.objects.filter(
             school=student.school,
-            class_level=(
-                student.current_class.level if student.current_class else "General"
-            ),
-            term=term,
-            academic_year=academic_year,
-            fees_status="active",
-            is_compulsory=True,
-        )
-
-        total_amount = (fee_structures.aggregate(models.Sum("amount"))["amount__sum"] or 0)
-
-        # Create invoice
-        invoice, created = FeeInvoice.objects.get_or_create(
-            student=student,
-            term=term,
-            academic_year=academic_year,
+            class_level=(student.current_class.level if student.current_class_id else "General"),
+            term=term,academic_year=academic_year,fees_status=FeesStatusChoices.APPROVED,is_compulsory=True,)
+        total_amount = fee_structures.aggregate(total=models.Sum("amount"))["total"] or Decimal("0")
+        invoice, created = FeeInvoice.objects.get_or_create(student=student,term=term,academic_year=academic_year,
             defaults={
                 "school": student.school,
                 "total_amount": total_amount,
                 "due_date": term.end_date,
-                "created_by": self.context["request"].user,
+                "created_by": request.user,
+                "invoice_status": InvoiceStatusChoices.DRAFT,
             },
         )
-
-        return invoice, FeeInvoice.objects.create(
-            student=student,
-            term=term,
-            academic_year=academic_year,
-            school=student.school,
-            total_amount=Decimal("0"),
-            due_date=term.end_date,
-            created_by=self.context["request"].user,
-        )
+        if not created and total_amount and invoice.total_amount != total_amount:
+            if invoice.invoice_status == InvoiceStatusChoices.DRAFT:
+                invoice.total_amount = total_amount
+                invoice.save(update_fields=["total_amount", "net_payable", "balance", "updated_at"])
+        return invoice
 
 
-#  STATISTICS SERIALIZERS
-class FinanceStatisticsSerializer(serializers.Serializer):
-    """Finance statistics"""
+    #  STATISTICS SERIALIZERS
+    class FinanceStatisticsSerializer(serializers.Serializer):
+        """Finance statistics"""
 
-    start_date = serializers.DateField(required=True)
-    end_date = serializers.DateField(required=True)
+        start_date = serializers.DateField(required=True)
+        end_date = serializers.DateField(required=True)
 
-    def validate(self, data):
-        if data["start_date"] > data["end_date"]:
-            raise serializers.ValidationError("Start date cannot be after end date")
+        def validate(self, data):
+            if data["start_date"] > data["end_date"]:
+                raise serializers.ValidationError("Start date cannot be after end date")
 
-        if (data["end_date"] - data["start_date"]).days > 365:
-            raise serializers.ValidationError("Date range cannot exceed 1 year")
+            if (data["end_date"] - data["start_date"]).days > 365:
+                raise serializers.ValidationError("Date range cannot exceed 1 year")
 
-        return data
+            return data
 
-    def get_statistics(self):
-        start_date = self.validated_data["start_date"]
-        end_date = self.validated_data["end_date"]
+        def get_statistics(self):
+            start_date = self.validated_data["start_date"]
+            end_date = self.validated_data["end_date"]
 
-        # Get data
-        payments = Payment.objects.filter(
-                paid_at__date__range=[start_date, end_date],
-                payment_status=PaymentStatusChoices.COMPLETED,
-            )
+            # Get data
+            payments = Payment.objects.filter(
+                    paid_at__date__range=[start_date, end_date],
+                    payment_status=PaymentStatusChoices.COMPLETED,
+                )
 
-        invoices = FeeInvoice.objects.filter(issue_date__range=[start_date, end_date])
+            invoices = FeeInvoice.objects.filter(issue_date__range=[start_date, end_date])
 
-        stats = {
-            "period": f"{start_date} to {end_date}",
-            "total_revenue": payments.aggregate(models.Sum("amount"))["amount__sum"]
-            or 0,
-            "total_invoiced": invoices.aggregate(models.Sum("total_amount"))[
-                "total_amount__sum"
-            ]
-            or 0,
-            "total_payments": payments.count(),
-            "total_invoices": invoices.count(),
-            "outstanding_balance": invoices.aggregate(models.Sum("balance"))[
-                "balance__sum"
-            ]
-            or 0,
-            "by_method": payments.values("method").annotate(
-                total=models.Sum("amount"), count=models.Count("id")
-            ),
-            "by_status": invoices.values("invoice_status").annotate(
-                total_amount=models.Sum("total_amount"),
-                total_balance=models.Sum("balance"),
-                count=models.Count("id"),
-            ),
-        }
+            stats = {
+                "period": f"{start_date} to {end_date}",
+                "total_revenue": payments.aggregate(models.Sum("amount"))["amount__sum"]
+                or 0,
+                "total_invoiced": invoices.aggregate(models.Sum("total_amount"))[
+                    "total_amount__sum"
+                ]
+                or 0,
+                "total_payments": payments.count(),
+                "total_invoices": invoices.count(),
+                "outstanding_balance": invoices.aggregate(models.Sum("balance"))[
+                    "balance__sum"
+                ]
+                or 0,
+                "by_method": payments.values("method").annotate(
+                    total=models.Sum("amount"), count=models.Count("id")
+                ),
+                "by_status": invoices.values("invoice_status").annotate(
+                    total_amount=models.Sum("total_amount"),
+                    total_balance=models.Sum("balance"),
+                    count=models.Count("id"),
+                ),
+            }
 
-        return stats
+            return stats
 
 
 class StudentFinanceSummarySerializer(serializers.Serializer):
@@ -327,23 +319,15 @@ class StudentFinanceSummarySerializer(serializers.Serializer):
             "total_paid": payments.aggregate(models.Sum("amount"))["amount__sum"] or 0,
             "total_balance": invoices.aggregate(models.Sum("balance"))["balance__sum"]
             or 0,
-            "active_invoices": invoices.filter(
-                invoice_status__in=["issued", "partially_paid", "overdue"]
-            ).count(),
-            "paid_invoices": invoices.filter(payment_status=PaymentStatusChoices.PAID).count(),
+            "active_invoices": invoices.filter(invoice_status__in=["issued", "partially_paid", "overdue"]).count(),
+            "paid_invoices": invoices.filter(invoice_status=InvoiceStatusChoices.PAID).count(),
             "payment_plan": None,
-            "bursaries": Bursary.objects.filter(
-                student=student, bursary_status=BursaryStatusChoices.APPROVED
-            ).values("type", "amount_awarded", "term__name"),
-            "recent_payments": PaymentListSerializer(
-                payments.order_by("-paid_at")[:5], many=True
-            ).data,
+            "bursaries": Bursary.objects.filter(student=student, bursary_status=BursaryStatusChoices.APPROVED).values("source", "amount_awarded", "term__name"),
+            #.values("type", "amount_awarded", "term__name"),
+            "recent_payments": PaymentListSerializer(payments.order_by("-paid_at")[:5], many=True ).data,
         }
-
         # Check for active payment plan
-        active_plan = PaymentPlan.objects.filter(
-            student=student, payment_plan_status=PaymentPlanStatusChoices.ACTIVE
-        ).first()
+        active_plan = PaymentPlan.objects.filter(student=student, plan_status=PaymentPlanStatusChoices.ACTIVE).first()
         if active_plan:
             summary["payment_plan"] = {
                 "total_amount": active_plan.total_amount,
@@ -404,7 +388,7 @@ class PaymentPlanDetailSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.user.get_full_name", read_only=True)
     student_admission = serializers.CharField( source="student.admission_number", read_only=True)
     frequency_display = serializers.CharField( source="get_frequency_display", read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    status_display = serializers.CharField(source="get_plan_status_display", read_only=True)
     signed_by_name = serializers.CharField(source="signed_by.get_full_name", read_only=True, allow_null=True)
 
     class Meta:
@@ -412,8 +396,6 @@ class PaymentPlanDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at"]
 
-
-# FIXED: PaymentCreateSerializer
 class PaymentCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment

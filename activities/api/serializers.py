@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 from staff.models import StaffProfile
 from ..models import Activity, Competition, StudentActivity
-
+from core.choices.activities import StudentActivityStatusChoices
 
 class ActivitySerializer(serializers.ModelSerializer):
     """Serializer for Activity model."""
@@ -65,7 +65,8 @@ class ActivitySerializer(serializers.ModelSerializer):
         teacher = data.get("teacher_in_charge")
         assistant = data.get("assistant_in_charge")
 
-        if teacher and not StaffProfile.objects.filter(user=teacher).exists():
+        # if teacher and not StaffProfile.objects.filter(user=teacher).exists():
+        if teacher and not StaffProfile.objects.filter(user=teacher, school=data.get("school") or getattr(self.instance, "school", None)).exists():
             raise serializers.ValidationError(
                 {"teacher_in_charge": "Teacher in charge must be a staff member."}
             )
@@ -80,7 +81,10 @@ class ActivitySerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context.get("request")
         if request and request.user.is_authenticated:
-            validated_data.setdefault("created_by", request.user)
+            # validated_data.setdefault("created_by", request.user)
+            school = getattr(request, "school", None) or getattr(request.user, "school", None)
+            if school:
+                validated_data.setdefault("school", school)
         return super().create(validated_data)
 
 
@@ -142,16 +146,24 @@ class StudentActivitySerializer(serializers.ModelSerializer):
         activity = data.get("activity") or getattr(self.instance, "activity", None)
 
         if student and activity:
-            if student.school != activity.school:
+            if student.school_id != activity.school_id:
                 raise serializers.ValidationError(
                     "Student and activity must belong to the same school."
                 )
 
-            # Check if activity has space
-            if activity.current_participants >= activity.max_participants:
-                raise serializers.ValidationError(
-                    f"Activity '{activity.name}' has reached maximum participants."
-                )
+            status = data.get("student_activity_status") or getattr(
+                self.instance, "student_activity_status", None
+            )
+            is_new = self.instance is None
+            becoming_active = status == StudentActivityStatusChoices.ACTIVE
+            if is_new or becoming_active:
+                active_count = activity.participants.filter(
+                    student_activity_status=StudentActivityStatusChoices.ACTIVE
+                ).exclude(pk=getattr(self.instance, "pk", None)).count()
+                if active_count >= activity.max_participants:
+                    raise serializers.ValidationError(
+                        {"activity": f"Activity '{activity.name}' is at capacity."}
+                    )
 
         # Validate dates
         start_date = data.get("start_date")
@@ -220,9 +232,10 @@ class CompetitionSerializer(serializers.ModelSerializer):
             self.instance, "created_by", None
         )
         if activity and created_by:
-            if activity.school != created_by.school:
+            creator_school_id = getattr(created_by, "school_id", None)
+            if creator_school_id and activity.school_id != creator_school_id:
                 raise serializers.ValidationError(
-                    "Competition creator must belong to the same school as the activity."
+                    "Creator must belong to the same school as the activity."
                 )
 
         budget_used = data.get("budget_used", 0)

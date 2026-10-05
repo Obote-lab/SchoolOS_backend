@@ -153,16 +153,16 @@ class RoomAllocation(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
 
-        if self.pk:
-            original = RoomAllocation.objects.get(pk=self.pk)
-            if original.is_active and not self.is_active:
-                # Deactivation → reduce occupancy
-                self.dormitory.current_occupancy = models.F("current_occupancy") - 1
-                self.dormitory.save(update_fields=["current_occupancy"])
-        else:
-            if self.is_active:
-                # New active allocation → increase occupancy
-                self.dormitory.current_occupancy = models.F("current_occupancy") + 1
-                self.dormitory.save(update_fields=["current_occupancy"])
+        # if self.pk:
+        #     original = RoomAllocation.objects.get(pk=self.pk)
+        #     if original.is_active and not self.is_active:
+        #         # Deactivation → reduce occupancy
+        #         self.dormitory.current_occupancy = models.F("current_occupancy") - 1
+        #         self.dormitory.save(update_fields=["current_occupancy"])
+        # else:
+        #     if self.is_active:
+        #         # New active allocation → increase occupancy
+        #         self.dormitory.current_occupancy = models.F("current_occupancy") + 1
+        #         self.dormitory.save(update_fields=["current_occupancy"])
 
         super().save(*args, **kwargs)

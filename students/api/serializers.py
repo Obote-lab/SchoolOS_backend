@@ -449,5 +449,5 @@ class AssignClassSerializer(serializers.Serializer):
 
 
 class LinkParentSerializer(serializers.Serializer):
-    parent_id = serializers.IntegerField()  # ParentGuardian pk
+    parent_id = serializers.UUIDField()  # ParentGuardian pk
     is_primary = serializers.BooleanField(default=False)

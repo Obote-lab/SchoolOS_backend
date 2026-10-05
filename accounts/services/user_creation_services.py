@@ -1,6 +1,5 @@
 """
 User Creation Service
-
 This is the ONLY recommended entry point for creating users in SchoolOS.
 Never create users directly from views or serializers.
 """
@@ -10,15 +9,12 @@ import logging
 from typing import Any
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
-from requests import request
 from core.choices import AccessLevelChoices
 from core.choices.identity import AuditActionChoices
-from ..models import AuditLog, CustomUser, Role, UserRole
+from ..models import CustomUser, Role, UserRole
 from .email_service import EmailService
 from .login_id_generator import LoginIDGenerator
 from core.audit import create_audit_log
-
-
 
 
 logger = logging.getLogger(__name__)
@@ -34,15 +30,9 @@ class UserCreationService:
     # PUBLIC API
     @classmethod
     @transaction.atomic
-    def create_user(
-        cls,
-        *,
-        creator: CustomUser,
-        user_data: dict[str, Any],
-        role_name: str,
-        school=None,
-        send_email: bool = True,
-    ) -> CustomUser:
+    def create_user(cls,*,creator: CustomUser,
+        user_data: dict[str, Any],role_name: str,
+        school=None,send_email: bool = True) -> CustomUser:
         """
         Create a user with full consistency guarantees.
 
@@ -62,14 +52,10 @@ class UserCreationService:
         login_id = cls._generate_unique_login_id(school=school)
 
         user = cls._create_user_record(
-            login_id=login_id,
-            school=school,
-            user_data=user_data,
-        )
-
+            login_id=login_id,school=school,user_data=user_data,)
         cls._assign_primary_role(creator, user, role, school)
         cls._apply_defaults(user, role)
-        cls._create_audit_log(creator, user, role, school)
+        cls._create_audit_log(creator, user, role, school, request=None)
 
         if send_email:
             try:
@@ -140,10 +126,7 @@ class UserCreationService:
             user.save(update_fields=["can_login", "notification_prefs"])
 
     @staticmethod
-    def _create_audit_log(creator, user, role, school):
-        highest_role = creator.get_highest_tier()
-        role_name = highest_role.name if highest_role else ""
-
+    def _create_audit_log(creator, user, role, school, request=None):
         create_audit_log(
             actor=creator,
             action=AuditActionChoices.CREATE,

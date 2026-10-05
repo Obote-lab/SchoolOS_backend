@@ -274,7 +274,8 @@ class FeedbackViewSet(viewsets.ModelViewSet):
             )
 
         feedback.resolution = resolution
-        feedback.feedback_status = Feedback.RESOLVED
+        # feedback.feedback_status = Feedback.RESOLVED
+        feedback.feedback_status = FeedbackStatusChoices.RESOLVED
         feedback.resolved_by = request.user
         feedback.resolved_at = timezone.now()
         feedback.save()
@@ -288,7 +289,8 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         feedback = self.get_object()
         rating = request.data.get("rating")
 
-        if feedback.feedback_status != Feedback.RESOLVED:
+        # if feedback.feedback_status != Feedback.RESOLVED:
+        if feedback.feedback_status != FeedbackStatusChoices.RESOLVED:
             return Response(
                 {"error": "Only resolved feedback can be rated."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -460,14 +462,14 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
 
         # Create acknowledgment notification
         Notification.objects.create(
-            user=request.user,
-            sender=announcement.created_by,
-            category=Notification.SYSTEM,
-            priority=Notification.NORMAL,
-            title=f"Acknowledged: {announcement.title}",
-            message=f"You have acknowledged the announcement: {announcement.title}",
-            action_url=f"/announcements/{announcement.id}/",
-        )
+                user=request.user,
+                sender=announcement.created_by,
+                notification_category=NotificationCategoryChoices.SYSTEM,
+                priority=NotificationPriorityChoices.NORMAL,
+                title=f"Acknowledged: {announcement.title}",
+                message=f"You have acknowledged: {announcement.title}",
+                action_url=f"/announcements/{announcement.id}/",
+            )
 
         serializer = self.get_serializer(announcement)
         return Response(serializer.data)
@@ -597,11 +599,11 @@ class ParentTeacherMeetingViewSet(viewsets.ModelViewSet):
             Notification.objects.create(
                 user=invitee,
                 sender=meeting.organizer,
-                category=Notification.EVENT,
+                category=NotificationPriorityChoices.EVENT,
                 priority=(
-                    Notification.HIGH
+                    NotificationPriorityChoices.HIGH
                     if meeting.meeting_status == MeetingStatusChoices.IN_PROGRESS
-                    else Notification.NORMAL
+                    else NotificationPriorityChoices.NORMAL
                 ),
                 title=f"Meeting Invitation: {meeting.title}",
                 message=f"You are invited to: {meeting.title}\nDate: {meeting.date}\nTime: {meeting.start_time} - {meeting.end_time}",

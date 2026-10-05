@@ -1,4 +1,3 @@
-from django.db.migrations import serializer
 from django.db.models import Count, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -13,7 +12,8 @@ from .serializers import (
     FeeInvoiceCreateSerializer,FeeInvoiceDetailSerializer,
     FeeInvoiceListSerializer, FeeStructureCreateSerializer,
     FeeStructureDetailSerializer,FeeStructureListSerializer,
-    FinanceStatisticsSerializer,FinancialTransactionCreateSerializer,
+    # FinanceStatisticsSerializer,
+    FinancialTransactionCreateSerializer,
     FinancialTransactionDetailSerializer,FinancialTransactionListSerializer,
     GenerateInvoiceSerializer,PaymentCreateSerializer,
     PaymentDetailSerializer,PaymentListSerializer,
@@ -30,9 +30,18 @@ from core.choices.finance import (
     PaymentPlanStatusChoices,
     PaymentStatusChoices,
 )
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.types import OpenApiTypes
+
+
 
 
 #  FEE STRUCTURE VIEWS
+@extend_schema_view(
+    list=extend_schema(tags=["Fee Structures"]),
+    retrieve=extend_schema(tags=["Fee Structures"]),
+    create=extend_schema(request=FeeStructureCreateSerializer, tags=["Fee Structures"]),
+)
 class FeeStructureViewSet(viewsets.ModelViewSet):
     """Fee structure management"""
 
@@ -45,7 +54,7 @@ class FeeStructureViewSet(viewsets.ModelViewSet):
         if getattr(self, "swagger_fake_view", False):
             return FeeStructure.objects.none()
         user = self.request.user
-        if hasattr(user, "school") and user.school:
+        if hasattr(user, "school") and self.request.school:
             return FeeStructure.objects.filter(school=user.school)
         return FeeStructure.objects.all()
 
@@ -118,7 +127,7 @@ class FeeInvoiceViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(student=user.student_profile)
 
         if hasattr(user, "school"):
-            queryset = queryset.filter(school=user.school)
+            queryset = queryset.filter(school=self.request.school)
         return queryset
 
     def get_serializer_class(self):
@@ -132,7 +141,9 @@ class FeeInvoiceViewSet(viewsets.ModelViewSet):
         school = getattr(self.request, "school", None) or self.request.user.school
         serializer.save(created_by=self.request.user, school=school)
 
-    @action(detail=True, methods=["post"])
+    
+    @extend_schema(request=RecordPaymentSerializer, responses={200: OpenApiTypes.OBJECT}, tags=["Fee Invoices"])
+    @action(detail=True, methods=["post"], url_path="record-payment")
     def record_payment(self, request, pk=None):
         """Record a payment for this invoice"""
         invoice = self.get_object()
@@ -240,26 +251,23 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def verify(self, request, pk=None):
-        """Verify payment and update invoice balances"""
         payment = self.get_object()
-
         if payment.payment_status == PaymentStatusChoices.COMPLETED:
             return Response({"detail": "Payment already verified"}, status=400)
+        if getattr(payment, "ledger_posted", False):
+            return Response({"detail": "Already posted to ledger"}, status=400)
+
         payment.payment_status = PaymentStatusChoices.COMPLETED
         payment.verified_by = request.user
         payment.save()
 
-        invoice = payment.invoice
-        invoice.amount_paid += payment.amount
-        invoice.balance = invoice.net_payable - invoice.amount_paid
-
-        if invoice.balance <= 0:
-            invoice.invoice_status = InvoiceStatusChoices.PAID
-            invoice.balance = 0
-        else:
-            invoice.invoice_status = InvoiceStatusChoices.PARTIALLY_PAID
-        invoice.save()
-        return Response({"status": "verified"})
+        payment.refresh_from_db()
+        payment.invoice.refresh_from_db()
+        return Response({
+            "status": "verified",
+            "invoice_balance": payment.invoice.balance,
+            "payment_reference": payment.payment_reference,
+        })
 
     @action(detail=True, methods=["post"])
     def reverse(self, request, pk=None):
@@ -292,15 +300,13 @@ class PaymentPlanViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return PaymentPlan.objects.none()
-        
-        user = self.request.user
-        queryset = PaymentPlan.objects.all()
-        if hasattr(user, "staff_profile") and user.staff_profile.school:
-            queryset = queryset.filter(school=user.staff_profile.school)
-        elif hasattr(user, "student_profile") and user.student_profile.school:
-            queryset = queryset.filter(school=user.student_profile.school)
-
-            return queryset
+        qs = PaymentPlan.objects.all()
+        school = getattr(self.request, "school", None) or getattr(
+            self.request.user, "school", None
+        )
+        if school:
+            qs = qs.filter(school=school)
+        return qs
 
     @action(detail=True, methods=["post"])
     def mark_defaulted(self, request, pk=None):
@@ -510,12 +516,12 @@ class FinanceStatisticsView(generics.GenericAPIView):
     """Finance statistics"""
 
     permission_classes = [IsAuthenticated]
-    serializer_class = FinanceStatisticsSerializer
+    serializer_class = FinanceDashboardSerializer
     queryset = FinancialTransaction.objects.none()
 
     def post(self, request):
         """Get financial statistics"""
-        serializer = FinanceStatisticsSerializer(data=request.data)
+        serializer = FinanceDashboardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         stats = serializer.get_statistics()
         return Response(stats)

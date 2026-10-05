@@ -191,7 +191,9 @@ class CounselingSessionViewSet(viewsets.ModelViewSet):
     filterset_fields = [
         "student",
         "counselor",
-        "counseling_session_type",
+        # "counseling_session_type",
+        # "get_counseling_session_type_display",
+        "session_type",
         "counseling_status",
     ]
     search_fields = ["reason", "location"]

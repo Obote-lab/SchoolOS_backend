@@ -3,8 +3,8 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.utils import timezone
-
-from core.choices import AuditActionChoices
+from core.audit import create_audit_log
+from core.choices.identity import AuditActionChoices
 from ..models import AuditLog, CustomUser, Role
 
 logger = logging.getLogger(__name__)
@@ -47,16 +47,15 @@ class EmailService:
             if audit_user and audit_action:
                 highest_role = audit_user.get_highest_tier()
                 role_name = highest_role.name if highest_role else ""
-
-                AuditLog.objects.create(
-                    user=audit_user,
-                    user_role=role_name,
-                    action_type=audit_action,
-                    model_name="CustomUser",
-                    record_id=audit_user.id,
-                    new_value=audit_message,
-                    school=audit_user.school,
-                )
+                create_audit_log(
+                        actor=audit_user,
+                        action=audit_action,
+                        model_name="CustomUser",
+                        record_id=audit_user.id,
+                        new_value=audit_message or "",
+                        school=getattr(audit_user, "school", None),
+                        reason=audit_message or "Email notification sent",
+                    )
 
             logger.info("Email sent successfully to %s", recipient)
             return True

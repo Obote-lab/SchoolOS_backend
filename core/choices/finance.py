@@ -29,6 +29,8 @@ class InvoiceStatusChoices(models.TextChoices):
     PAID = "paid", _("Paid")
     OVERDUE = "overdue", _("Overdue")
     WRITTEN_OFF = "written_off", _("Written Off")
+    VOID = "void",_("Void")
+    CANCELLED = "cancelled",_("Cancelled")
 
 
 class PaymentMethodChoices(models.TextChoices):

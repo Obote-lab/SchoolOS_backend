@@ -1,6 +1,7 @@
 from django.db.models import Count, Q, Avg
 from django.shortcuts import get_object_or_404
-from datetime import timedelta, timezone
+from datetime import timedelta
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
@@ -31,6 +32,7 @@ class SystemAuditEventViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = SystemAuditEventSerializer
     permission_classes = [permissions.IsAuthenticated, HasPermission]
+    module = "compliance"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter,]
 
     #Only include fields that exist on SystemAuditEvent
@@ -50,9 +52,17 @@ class SystemAuditEventViewSet(viewsets.ReadOnlyModelViewSet):
 
         queryset = SystemAuditEvent.objects.filter(user=user)
 
-        if hasattr(user, "staff_profile"):
-            school = user.staff_profile.school
-            queryset = queryset | SystemAuditEvent.objects.filter(school=school)
+        # if hasattr(user, "staff_profile"):
+        #     school = user.staff_profile.school
+        #     queryset = queryset | SystemAuditEvent.objects.filter(school=school)
+        school = getattr(self.request, "school", None)
+        if user.is_superuser:
+            return SystemAuditEvent.objects.all()
+        if school:
+            return SystemAuditEvent.objects.filter(school=school)
+        if hasattr(user, "staff_profile") and user.staff_profile.school_id:
+            return SystemAuditEvent.objects.filter(school=user.staff_profile.school)
+        return SystemAuditEvent.objects.filter(user=user)
 
         return queryset.distinct()
 
@@ -99,7 +109,9 @@ class DataExportLogViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = DataExportLogSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission]
+    module = "compliance"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["export_type", "format", "exported_by"]
     search_fields = ["purpose", "exported_by__login_id", "approved_by__login_id"]
@@ -178,6 +190,7 @@ class SystemHealthViewSet(viewsets.ModelViewSet):
 
     serializer_class = SystemHealthSerializer
     permission_classes = [permissions.IsAuthenticated]
+    module = "compliance"
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ["school", "backup_status", "sync_status"]
     ordering_fields = ["check_timestamp", "performance_score"]
@@ -226,9 +239,11 @@ class SystemHealthViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
         # Create a default record if none exists
-        default_health = SystemHealth.objects.create(school=school, checked_by="system")
-        serializer = self.get_serializer(default_health)
-        return Response(serializer.data)
+        # default_health = SystemHealth.objects.create(school=school, checked_by="system")
+        # serializer = self.get_serializer(default_health)
+        # return Response(serializer.data)
+        if not health:
+            return Response({"detail": "No health record yet."}, status=404)
 
     @action(detail=False, methods=["get"])
     def issues(self, request):
@@ -236,7 +251,8 @@ class SystemHealthViewSet(viewsets.ModelViewSet):
         queryset = (
             self.get_queryset()
             .filter(
-                Q(issues_detected__len__gt=0)
+                # Q(issues_detected__len__gt=0)
+                ~Q(issues_detected=[]) & ~Q(issues_detected=None)
                 | Q(performance_score__lt=70)
                 | Q(backup_status=HealthStatusChoices.FAILED)
             )
@@ -266,6 +282,7 @@ class ComplianceCheckViewSet(viewsets.ModelViewSet):
 
     serializer_class = ComplianceCheckSerializer
     permission_classes = [permissions.IsAuthenticated]
+    module = "compliance"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = [
         "school",
