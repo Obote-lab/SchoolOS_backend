@@ -1,26 +1,17 @@
 from django.db.models import Count, Sum
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import filters, generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from ..models import ( Bursary, FeeInvoice, FeeStructure, FinancialTransaction,Payment, PaymentPlan,)
-from .serializers import (
-    ApproveBursarySerializer,BursaryDetailSerializer,
-    FeeInvoiceCreateSerializer,FeeInvoiceDetailSerializer,
-    FeeInvoiceListSerializer, FeeStructureCreateSerializer,
-    FeeStructureDetailSerializer,FeeStructureListSerializer,
-    # FinanceStatisticsSerializer,
-    FinancialTransactionCreateSerializer,
-    FinancialTransactionDetailSerializer,FinancialTransactionListSerializer,
-    GenerateInvoiceSerializer,PaymentCreateSerializer,
-    PaymentDetailSerializer,PaymentListSerializer,
-    PaymentPlanDetailSerializer,RecordPaymentSerializer,
-    StudentFinanceSummarySerializer,
-    FinanceDashboardSerializer, FinanceReportSerializer,MpesaCallbackSerializer,
-)
+import logging
+from rest_framework.permissions import AllowAny
+from finance.services.mpesa import MpesaService
+
+logger = logging.getLogger(__name__)
 
 from core.choices.finance import (
     BursaryStatusChoices,
@@ -30,33 +21,84 @@ from core.choices.finance import (
     PaymentPlanStatusChoices,
     PaymentStatusChoices,
 )
-from drf_spectacular.utils import extend_schema, extend_schema_view
-from drf_spectacular.types import OpenApiTypes
+
+from ..models import (
+    Bursary,
+    FeeInvoice,
+    FeeStructure,
+    FinancialTransaction,
+    InvoiceItem,
+    Payment,
+    PaymentAllocation,
+    PaymentPlan,
+)
+from .serializers import (
+    ApproveBursarySerializer,
+    BursaryDetailSerializer,
+    FeeInvoiceCreateSerializer,
+    FeeInvoiceDetailSerializer,
+    FeeInvoiceListSerializer,
+    FeeStructureCreateSerializer,
+    FeeStructureDetailSerializer,
+    FeeStructureListSerializer,
+    FinancialTransactionCreateSerializer,
+    FinancialTransactionDetailSerializer,
+    FinancialTransactionListSerializer,
+    FinanceDashboardSerializer,
+    FinanceReportSerializer,
+    GenerateInvoiceSerializer,
+    MpesaCallbackSerializer,
+    PaymentCreateSerializer,
+    PaymentDetailSerializer,
+    PaymentListSerializer,
+    PaymentPlanDetailSerializer,
+    RecordPaymentSerializer,
+    StudentFinanceSummarySerializer,
+    StkPushSerializer
+)
 
 
+# Helpers
+
+def _school(request):
+    """Prefer middleware-injected school, fall back to user.school."""
+    return getattr(request, "school", None) or getattr(request.user, "school", None)
 
 
-#  FEE STRUCTURE VIEWS
+# Fee Structure
 @extend_schema_view(
     list=extend_schema(tags=["Fee Structures"]),
     retrieve=extend_schema(tags=["Fee Structures"]),
     create=extend_schema(request=FeeStructureCreateSerializer, tags=["Fee Structures"]),
+    update=extend_schema(tags=["Fee Structures"]),
+    partial_update=extend_schema(tags=["Fee Structures"]),
+    destroy=extend_schema(tags=["Fee Structures"]),
 )
 class FeeStructureViewSet(viewsets.ModelViewSet):
-    """Fee structure management"""
-
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ["class_level", "term", "academic_year", "fees_category", "fees_status"]
-    search_fields = ["description"]
+    filterset_fields = [
+        "class_level",
+        "level",
+        "term",
+        "academic_year",
+        "fees_category",
+        "fees_status",
+    ]
+    search_fields = ["description", "class_level"]
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return FeeStructure.objects.none()
-        user = self.request.user
-        if hasattr(user, "school") and self.request.school:
-            return FeeStructure.objects.filter(school=user.school)
-        return FeeStructure.objects.all()
+        school = _school(self.request)
+        qs = FeeStructure.objects.select_related(
+            "school", "term", "academic_year", "level", "approved_by"
+        )
+        if school:
+            return qs.filter(school=school)
+        if self.request.user.is_superuser:
+            return qs
+        return qs.none()
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -64,7 +106,6 @@ class FeeStructureViewSet(viewsets.ModelViewSet):
         if self.action in ["create", "update", "partial_update"]:
             return FeeStructureCreateSerializer
         return FeeStructureDetailSerializer
-
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
@@ -81,71 +122,218 @@ class FeeStructureViewSet(viewsets.ModelViewSet):
         fee_structure.save(update_fields=["fees_status", "updated_at"])
         return Response({"status": "activated"})
 
-        # for_class
-        fees_status=FeesStatusChoices.ACTIVE
-
     @action(detail=False, methods=["get"])
     def for_class(self, request):
-        """Get fee structures for a specific class"""
+        """Get active fee structures for a specific class / term."""
         class_level = request.query_params.get("class_level")
         term_id = request.query_params.get("term")
         academic_year_id = request.query_params.get("academic_year")
 
         if not class_level or not term_id:
-            return Response({"error": "class_level and term parameters required"}, status=400)
+            return Response(
+                {"error": "class_level and term parameters required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        fee_structures = FeeStructure.objects.filter(class_level=class_level, term_id=term_id, fees_status="active" )
-
+        qs = self.get_queryset().filter(
+            class_level=class_level,
+            term_id=term_id,
+            fees_status=FeesStatusChoices.ACTIVE,
+        )
         if academic_year_id:
-            fee_structures = fee_structures.filter(academic_year_id=academic_year_id)
+            qs = qs.filter(academic_year_id=academic_year_id)
 
-        serializer = FeeStructureListSerializer(fee_structures, many=True)
+        serializer = FeeStructureListSerializer(qs, many=True)
         return Response(serializer.data)
 
 
-#  FEE INVOICE VIEWS
-class FeeInvoiceViewSet(viewsets.ModelViewSet):
-    """Fee invoice management"""
+# # Fee Invoice
+# @extend_schema(tags=["Fee Invoices"])
+# class FeeInvoiceViewSet(viewsets.ModelViewSet):
+#     permission_classes = [IsAuthenticated]
+#     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+#     filterset_fields = ["student", "term", "academic_year", "invoice_status"]
+#     search_fields = ["invoice_number", "notes"]
 
+#     def get_queryset(self):
+#         if getattr(self, "swagger_fake_view", False):
+#             return FeeInvoice.objects.none()
+
+#         qs = FeeInvoice.objects.select_related(
+#             "student__user", "term", "academic_year", "school", "created_by"
+#         ).prefetch_related("items", "payments", "allocations")
+
+#         school = _school(self.request)
+#         if school:
+#             qs = qs.filter(school=school)
+
+#         # Student can only see their own invoices
+#         if hasattr(self.request.user, "student_profile"):
+#             qs = qs.filter(student=self.request.user.student_profile)
+
+#         start_date = self.request.query_params.get("start_date")
+#         end_date = self.request.query_params.get("end_date")
+#         if start_date and end_date:
+#             qs = qs.filter(issue_date__range=[start_date, end_date])
+
+#         return qs
+
+#     def get_serializer_class(self):
+#         if self.action == "list":
+#             return FeeInvoiceListSerializer
+#         if self.action in ["create", "update", "partial_update"]:
+#             return FeeInvoiceCreateSerializer
+#         return FeeInvoiceDetailSerializer
+
+#     def perform_create(self, serializer):
+#         school = _school(self.request)
+#         serializer.save(created_by=self.request.user, school=school)
+
+#     @extend_schema(
+#         request=RecordPaymentSerializer,
+#         responses={200: OpenApiTypes.OBJECT},
+#         tags=["Fee Invoices"],
+#     )
+#     @action(detail=True, methods=["post"], url_path="record-payment")
+#     def record_payment(self, request, pk=None):
+#         """Record a manual payment against this invoice."""
+#         invoice = self.get_object()
+#         serializer = RecordPaymentSerializer(
+#             data=request.data, context={"invoice": invoice, "request": request}
+#         )
+#         serializer.is_valid(raise_exception=True)
+#         payment = serializer.save()
+
+#         # Refresh so we return the latest balance after signals
+#         invoice.refresh_from_db()
+
+#         return Response(
+#             {
+#                 "status": "payment_recorded",
+#                 "payment_id": str(payment.id),
+#                 "payment_reference": payment.payment_reference,
+#                 "payment_status": payment.payment_status,
+#                 "invoice_balance": str(invoice.balance),
+#             }
+#         )
+
+#     @action(detail=True, methods=["post"])
+#     def issue(self, request, pk=None):
+#         invoice = self.get_object()
+#         if invoice.invoice_status != InvoiceStatusChoices.DRAFT:
+#             return Response(
+#                 {"detail": "Only DRAFT invoices can be issued."},
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+#         invoice.invoice_status = InvoiceStatusChoices.ISSUED
+#         invoice.approved_by = request.user
+#         invoice.save(update_fields=["invoice_status", "approved_by", "updated_at"])
+#         return Response({"status": "issued"})
+
+#     @action(detail=True, methods=["post"])
+#     def mark_paid(self, request, pk=None):
+#         """Force-mark as paid (use with care – prefer real payments)."""
+#         invoice = self.get_object()
+#         invoice.invoice_status = InvoiceStatusChoices.PAID
+#         invoice.amount_paid = invoice.net_payable
+#         invoice.balance = 0
+#         invoice.save(
+#             update_fields=["invoice_status", "amount_paid", "balance", "updated_at"]
+#         )
+#         return Response({"status": "marked_paid"})
+
+#     @action(detail=True, methods=["get"])
+#     def payment_history(self, request, pk=None):
+#         invoice = self.get_object()
+#         payments = invoice.payments.all().order_by("-paid_at")
+#         serializer = PaymentListSerializer(payments, many=True)
+#         return Response(serializer.data)
+
+#     @action(detail=False, methods=["post"])
+#     def generate(self, request):
+#         """Generate invoice from approved fee structures + create line items."""
+#         serializer = GenerateInvoiceSerializer(
+#             data=request.data, context={"request": request}
+#         )
+#         serializer.is_valid(raise_exception=True)
+#         invoice = serializer.save()
+#         return Response(
+#             {
+#                 "status": "invoice_generated",
+#                 "invoice_id": str(invoice.id),
+#                 "invoice_number": invoice.invoice_number,
+#                 "total_amount": str(invoice.total_amount),
+#                 "balance": str(invoice.balance),
+#             }
+#         )
+
+#     @action(detail=False, methods=["get"])
+#     def overdue(self, request):
+#         today = timezone.now().date()
+#         qs = self.get_queryset().filter(
+#             due_date__lt=today,
+#             invoice_status__in=[
+#                 InvoiceStatusChoices.ISSUED,
+#                 InvoiceStatusChoices.PARTIALLY_PAID,
+#             ],
+#         )
+#         serializer = FeeInvoiceListSerializer(qs, many=True)
+#         return Response(serializer.data)
+
+
+
+@extend_schema(tags=["Fee Invoices"])
+class FeeInvoiceViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["student", "term", "academic_year", "invoice_status"]
     search_fields = ["invoice_number", "notes"]
 
     def get_queryset(self):
-        # Filter by date range if provided
         if getattr(self, "swagger_fake_view", False):
             return FeeInvoice.objects.none()
 
+        qs = FeeInvoice.objects.select_related(
+            "student__user", "term", "academic_year", "school", "created_by"
+        ).prefetch_related("items", "payments", "allocations")
+
+        school = _school(self.request)
+        if school:
+            qs = qs.filter(school=school)
+
+        # Student can only see their own invoices
+        if hasattr(self.request.user, "student_profile"):
+            qs = qs.filter(student=self.request.user.student_profile)
+
         start_date = self.request.query_params.get("start_date")
         end_date = self.request.query_params.get("end_date")
-        queryset = FeeInvoice.objects.all()
         if start_date and end_date:
-            queryset = queryset.filter(issue_date__range=[start_date, end_date])
-        user = self.request.user
-        if hasattr(user, "student_profile"):
-            queryset = queryset.filter(student=user.student_profile)
+            qs = qs.filter(issue_date__range=[start_date, end_date])
 
-        if hasattr(user, "school"):
-            queryset = queryset.filter(school=self.request.school)
-        return queryset
+        return qs
 
     def get_serializer_class(self):
         if self.action == "list":
             return FeeInvoiceListSerializer
-        elif self.action == "create":
+        if self.action in ["create", "update", "partial_update"]:
             return FeeInvoiceCreateSerializer
         return FeeInvoiceDetailSerializer
 
     def perform_create(self, serializer):
-        school = getattr(self.request, "school", None) or self.request.user.school
+        school = _school(self.request)
         serializer.save(created_by=self.request.user, school=school)
 
-    
-    @extend_schema(request=RecordPaymentSerializer, responses={200: OpenApiTypes.OBJECT}, tags=["Fee Invoices"])
+    # ------------------------------------------------------------------
+    # Manual payment (cash / bank / already-paid M-Pesa code)
+    # ------------------------------------------------------------------
+    @extend_schema(
+        request=RecordPaymentSerializer,
+        responses={200: OpenApiTypes.OBJECT},
+        tags=["Fee Invoices"],
+    )
     @action(detail=True, methods=["post"], url_path="record-payment")
     def record_payment(self, request, pk=None):
-        """Record a payment for this invoice"""
+        """Record a manual payment against this invoice."""
         invoice = self.get_object()
         serializer = RecordPaymentSerializer(
             data=request.data, context={"invoice": invoice, "request": request}
@@ -153,37 +341,120 @@ class FeeInvoiceViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         payment = serializer.save()
 
+        invoice.refresh_from_db()
+
         return Response(
             {
                 "status": "payment_recorded",
                 "payment_id": str(payment.id),
                 "payment_reference": payment.payment_reference,
-                "invoice_balance": invoice.balance,
+                "payment_status": payment.payment_status,
+                "invoice_balance": str(invoice.balance),
             }
         )
 
+    # STK Push (Lipa Na M-Pesa)
+    @extend_schema(
+        request=StkPushSerializer,
+        responses={200: OpenApiTypes.OBJECT},
+        tags=["Fee Invoices"],
+    )
+    @action(detail=True, methods=["post"], url_path="stk-push")
+    def stk_push(self, request, pk=None):
+        """
+        Initiate an M-Pesa STK Push for this invoice.
+        The parent will receive a prompt on their phone to enter the M-Pesa PIN.
+        """
+        from finance.services.mpesa import MpesaError, MpesaService
+
+        invoice = self.get_object()
+
+        if invoice.balance <= 0:
+            return Response(
+                {"detail": "Invoice has no outstanding balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = StkPushSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        phone = serializer.validated_data["phone"]
+        amount = serializer.validated_data.get("amount") or invoice.balance
+
+        if amount > invoice.balance:
+            return Response(
+                {
+                    "detail": f"Amount cannot exceed outstanding balance of KES {invoice.balance}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            service = MpesaService()
+            payment = service.stk_push(
+                phone=phone,
+                amount=amount,
+                account_reference=invoice.invoice_number[-12:],  # max 12 chars
+                transaction_desc=f"Fees {invoice.invoice_number}"[:13],
+                invoice=invoice,
+                student=invoice.student,
+                school=invoice.school,
+                initiated_by=request.user,
+            )
+        except MpesaError as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"Unexpected error: {e}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "status": "stk_push_initiated",
+                "payment_id": str(payment.id),
+                "payment_reference": payment.payment_reference,
+                "checkout_request_id": payment.checkout_request_id,
+                "phone": payment.mpesa_phone,
+                "amount": str(payment.amount),
+                "message": "STK Push sent. Ask the parent to enter their M-Pesa PIN.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    # ------------------------------------------------------------------
+    # Other actions
+    # ------------------------------------------------------------------
     @action(detail=True, methods=["post"])
     def issue(self, request, pk=None):
-        """Issue the invoice"""
         invoice = self.get_object()
+        if invoice.invoice_status != InvoiceStatusChoices.DRAFT:
+            return Response(
+                {"detail": "Only DRAFT invoices can be issued."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         invoice.invoice_status = InvoiceStatusChoices.ISSUED
         invoice.approved_by = request.user
-        invoice.save()
+        invoice.save(update_fields=["invoice_status", "approved_by", "updated_at"])
         return Response({"status": "issued"})
 
     @action(detail=True, methods=["post"])
     def mark_paid(self, request, pk=None):
-        """Mark invoice as paid"""
+        """Force-mark as paid (use with care – prefer real payments)."""
         invoice = self.get_object()
         invoice.invoice_status = InvoiceStatusChoices.PAID
         invoice.amount_paid = invoice.net_payable
         invoice.balance = 0
-        invoice.save()
+        invoice.save(
+            update_fields=["invoice_status", "amount_paid", "balance", "updated_at"]
+        )
         return Response({"status": "marked_paid"})
 
     @action(detail=True, methods=["get"])
     def payment_history(self, request, pk=None):
-        """Get payment history for this invoice"""
         invoice = self.get_object()
         payments = invoice.payments.all().order_by("-paid_at")
         serializer = PaymentListSerializer(payments, many=True)
@@ -191,7 +462,7 @@ class FeeInvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def generate(self, request):
-        """Generate invoice from fee structure"""
+        """Generate invoice from approved fee structures + create line items."""
         serializer = GenerateInvoiceSerializer(
             data=request.data, context={"request": request}
         )
@@ -202,47 +473,63 @@ class FeeInvoiceViewSet(viewsets.ModelViewSet):
                 "status": "invoice_generated",
                 "invoice_id": str(invoice.id),
                 "invoice_number": invoice.invoice_number,
+                "total_amount": str(invoice.total_amount),
+                "balance": str(invoice.balance),
             }
         )
 
     @action(detail=False, methods=["get"])
     def overdue(self, request):
-        """Get overdue invoices"""
         today = timezone.now().date()
-        overdue_invoices = FeeInvoice.objects.filter(
-            due_date__lt=today, invoice_status__in=[InvoiceStatusChoices.ISSUED, InvoiceStatusChoices.PARTIALLY_PAID]
+        qs = self.get_queryset().filter(
+            due_date__lt=today,
+            invoice_status__in=[
+                InvoiceStatusChoices.ISSUED,
+                InvoiceStatusChoices.PARTIALLY_PAID,
+            ],
         )
-        serializer = self.get_serializer(overdue_invoices, many=True)
+        serializer = FeeInvoiceListSerializer(qs, many=True)
         return Response(serializer.data)
 
 
-#  PAYMENT VIEWS
-class PaymentViewSet(viewsets.ModelViewSet):
-    """Payment management"""
 
+# Payment
+@extend_schema(tags=["Payments"])
+class PaymentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["student", "invoice", "method", "payment_status", "received_by"]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = [
+        "student",
+        "invoice",
+        "method",
+        "payment_status",
+        "received_by",
+    ]
+    search_fields = ["payment_reference", "mpesa_receipt", "bank_ref"]
 
     def get_queryset(self):
-        user = self.request.user
-        queryset = Payment.objects.all()
+        if getattr(self, "swagger_fake_view", False):
+            return Payment.objects.none()
 
-        if hasattr(user, "school"):
-            queryset = queryset.filter(school=user.school)
+        qs = Payment.objects.select_related(
+            "student__user", "invoice", "school", "received_by", "verified_by"
+        ).prefetch_related("allocations")
+
+        school = _school(self.request)
+        if school:
+            qs = qs.filter(school=school)
 
         start_date = self.request.query_params.get("start_date")
         end_date = self.request.query_params.get("end_date")
-
         if start_date and end_date:
-            queryset = queryset.filter(paid_at__date__range=[start_date, end_date])
+            qs = qs.filter(paid_at__date__range=[start_date, end_date])
 
-        return queryset
+        return qs
 
     def get_serializer_class(self):
         if self.action == "list":
             return PaymentListSerializer
-        elif self.action == "create":
+        if self.action in ["create", "update", "partial_update"]:
             return PaymentCreateSerializer
         return PaymentDetailSerializer
 
@@ -251,95 +538,115 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def verify(self, request, pk=None):
+        """Mark a PENDING payment as COMPLETED (triggers allocation + ledger)."""
         payment = self.get_object()
+
         if payment.payment_status == PaymentStatusChoices.COMPLETED:
-            return Response({"detail": "Payment already verified"}, status=400)
+            return Response(
+                {"detail": "Payment already verified"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if getattr(payment, "ledger_posted", False):
-            return Response({"detail": "Already posted to ledger"}, status=400)
+            return Response(
+                {"detail": "Already posted to ledger"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         payment.payment_status = PaymentStatusChoices.COMPLETED
         payment.verified_by = request.user
-        payment.save()
+        payment.save(update_fields=["payment_status", "verified_by", "updated_at"])
 
         payment.refresh_from_db()
-        payment.invoice.refresh_from_db()
-        return Response({
-            "status": "verified",
-            "invoice_balance": payment.invoice.balance,
-            "payment_reference": payment.payment_reference,
-        })
+        balance = None
+        if payment.invoice_id:
+            payment.invoice.refresh_from_db()
+            balance = str(payment.invoice.balance)
+
+        return Response(
+            {
+                "status": "verified",
+                "payment_reference": payment.payment_reference,
+                "invoice_balance": balance,
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def reverse(self, request, pk=None):
-        """Reverse payment"""
         payment = self.get_object()
+        if payment.payment_status == PaymentStatusChoices.REVERSED:
+            return Response(
+                {"detail": "Already reversed"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
         payment.payment_status = PaymentStatusChoices.REVERSED
         payment.reversal_reason = request.data.get("reason", "")
-        payment.save()
+        payment.save(
+            update_fields=["payment_status", "reversal_reason", "updated_at"]
+        )
         return Response({"status": "reversed"})
 
     @action(detail=False, methods=["get"])
     def today(self, request):
-        """Get today's payments"""
         today = timezone.now().date()
-        payments = Payment.objects.filter(
-            paid_at__date=today, payment_status=PaymentStatusChoices.COMPLETED
+        qs = self.get_queryset().filter(
+            paid_at__date=today,
+            payment_status=PaymentStatusChoices.COMPLETED,
         )
-        serializer = self.get_serializer(payments, many=True)
+        serializer = PaymentListSerializer(qs, many=True)
         return Response(serializer.data)
 
 
-#  PAYMENT PLAN VIEWS
+# Payment Plan
+@extend_schema(tags=["Payment Plans"])
 class PaymentPlanViewSet(viewsets.ModelViewSet):
-    """Payment plan management"""
-
     permission_classes = [IsAuthenticated]
     serializer_class = PaymentPlanDetailSerializer
-    queryset = PaymentPlan.objects.all()
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["student", "term", "plan_status"]
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return PaymentPlan.objects.none()
-        qs = PaymentPlan.objects.all()
-        school = getattr(self.request, "school", None) or getattr(
-            self.request.user, "school", None
-        )
+        qs = PaymentPlan.objects.select_related("student__user", "term", "school")
+        school = _school(self.request)
         if school:
-            qs = qs.filter(school=school)
-        return qs
+            return qs.filter(school=school)
+        if self.request.user.is_superuser:
+            return qs
+        return qs.none()
 
     @action(detail=True, methods=["post"])
     def mark_defaulted(self, request, pk=None):
-        """Mark payment plan as defaulted"""
-        payment_plan = self.get_object()
-        payment_plan.plan_status = PaymentPlanStatusChoices.DEFAULTED
-        payment_plan.save()
+        plan = self.get_object()
+        plan.plan_status = PaymentPlanStatusChoices.DEFAULTED
+        plan.save(update_fields=["plan_status", "updated_at"])
         return Response({"status": "marked_defaulted"})
 
 
-#  BURSARY VIEWS
-class BursaryViewSet(viewsets.ModelViewSet):
-    """Bursary management"""
 
+# Bursary
+@extend_schema(tags=["Bursaries"])
+class BursaryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = BursaryDetailSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["student", "bursary_status", "source", "term"]
 
     def get_queryset(self):
-        user = self.request.user
-        queryset = Bursary.objects.all()
-
-        if hasattr(user, "school"):
-            queryset = queryset.filter(school=user.school)
+        if getattr(self, "swagger_fake_view", False):
+            return Bursary.objects.none()
+        qs = Bursary.objects.select_related(
+            "student__user", "school", "term", "academic_year", "approved_by"
+        )
+        school = _school(self.request)
+        if school:
+            qs = qs.filter(school=school)
 
         student_id = self.request.query_params.get("student")
         if student_id:
-            queryset = queryset.filter(student_id=student_id)
-
-        return queryset
+            qs = qs.filter(student_id=student_id)
+        return qs
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
-        """Approve bursary"""
         bursary = self.get_object()
         serializer = ApproveBursarySerializer(
             data=request.data, context={"request": request}
@@ -350,77 +657,79 @@ class BursaryViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def disburse(self, request, pk=None):
-        """Disburse bursary funds"""
         bursary = self.get_object()
         if bursary.bursary_status != BursaryStatusChoices.APPROVED:
-            return Response({"error": "Bursary must be approved first"}, status=400)
-
+            return Response(
+                {"error": "Bursary must be approved first"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         bursary.bursary_status = BursaryStatusChoices.DISBURSED
         bursary.disbursement_date = timezone.now().date()
-        bursary.save()
+        bursary.save(
+            update_fields=["bursary_status", "disbursement_date", "updated_at"]
+        )
         return Response({"status": "disbursed"})
 
     @action(detail=False, methods=["get"])
     def pending(self, request):
-        """Get pending bursary applications"""
-        pending_bursaries = Bursary.objects.filter(bursary_status=BursaryStatusChoices.APPLIED)
-        serializer = self.get_serializer(pending_bursaries, many=True)
+        qs = self.get_queryset().filter(bursary_status=BursaryStatusChoices.APPLIED)
+        serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
 
-#  FINANCIAL TRANSACTION VIEWS
+# Financial Transaction
+@extend_schema(tags=["Financial Transactions"])
 class FinancialTransactionViewSet(viewsets.ModelViewSet):
-    """Financial transaction management"""
-
     permission_classes = [IsAuthenticated]
-    serializer_class = FinancialTransactionDetailSerializer
-    queryset = FinancialTransaction.objects.all()
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = [
+        "transaction_type",
+        "finance_category",
+        "transaction_status",
+    ]
 
     def get_queryset(self):
-        user = self.request.user
-        queryset = FinancialTransaction.objects.all()
-
-        if hasattr(user, "school"):
-            queryset = queryset.filter(school=user.school)
+        if getattr(self, "swagger_fake_view", False):
+            return FinancialTransaction.objects.none()
+        qs = FinancialTransaction.objects.select_related(
+            "school", "approved_by", "verified_by"
+        )
+        school = _school(self.request)
+        if school:
+            qs = qs.filter(school=school)
 
         start_date = self.request.query_params.get("start_date")
         end_date = self.request.query_params.get("end_date")
-
         if start_date and end_date:
-            queryset = queryset.filter(date__range=[start_date, end_date])
-
-        return queryset
+            qs = qs.filter(date__range=[start_date, end_date])
+        return qs
 
     def get_serializer_class(self):
         if self.action == "list":
             return FinancialTransactionListSerializer
-        elif self.action == "create":
+        if self.action in ["create", "update", "partial_update"]:
             return FinancialTransactionCreateSerializer
         return FinancialTransactionDetailSerializer
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
-        """Approve transaction"""
-        transaction = self.get_object()
-        transaction.transaction_status = FinancialTransactionStatusChoices.APPROVED
-        transaction.approved_by = request.user
-        transaction.save()
+        txn = self.get_object()
+        txn.transaction_status = FinanceTransactionStatusChoices.APPROVED
+        txn.approved_by = request.user
+        txn.save(update_fields=["transaction_status", "approved_by", "updated_at"])
         return Response({"status": "approved"})
 
     @action(detail=True, methods=["post"])
     def post(self, request, pk=None):
-        """Post transaction to ledger"""
-        transaction = self.get_object()
-        transaction.transaction_status = FinancialTransactionStatusChoices.POSTED
-        transaction.verified_by = request.user
-        transaction.save()
+        txn = self.get_object()
+        txn.transaction_status = FinanceTransactionStatusChoices.POSTED
+        txn.verified_by = request.user
+        txn.save(update_fields=["transaction_status", "verified_by", "updated_at"])
         return Response({"status": "posted"})
 
 
-#  DASHBOARD & STATISTICS VIEWS
+# Dashboard & Statistics
 class FinanceDashboardView(generics.GenericAPIView):
-    """Finance dashboard"""
-
     permission_classes = [IsAuthenticated]
     serializer_class = FinanceDashboardSerializer
     queryset = FeeInvoice.objects.none()
@@ -437,13 +746,14 @@ class FinanceDashboardView(generics.GenericAPIView):
 
     def get_today_stats(self):
         today = timezone.now().date()
-        user = self.request.user
+        school = _school(self.request)
 
         payments = Payment.objects.filter(
-            paid_at__date=today, payment_status=PaymentStatusChoices.COMPLETED, school=user.school
+            paid_at__date=today,
+            payment_status=PaymentStatusChoices.COMPLETED,
+            school=school,
         )
-
-        invoices = FeeInvoice.objects.filter(issue_date=today, school=user.school)
+        invoices = FeeInvoice.objects.filter(issue_date=today, school=school)
 
         return {
             "date": today,
@@ -459,16 +769,15 @@ class FinanceDashboardView(generics.GenericAPIView):
     def get_monthly_summary(self):
         today = timezone.now().date()
         month_start = today.replace(day=1)
-        user = self.request.user
+        school = _school(self.request)
 
         payments = Payment.objects.filter(
             paid_at__date__range=[month_start, today],
             payment_status=PaymentStatusChoices.COMPLETED,
-            school=user.school,
+            school=school,
         )
-
         invoices = FeeInvoice.objects.filter(
-            issue_date__range=[month_start, today], school=user.school
+            issue_date__range=[month_start, today], school=school
         )
 
         return {
@@ -480,71 +789,65 @@ class FinanceDashboardView(generics.GenericAPIView):
             or 0,
             "outstanding_balance": invoices.aggregate(Sum("balance"))["balance__sum"]
             or 0,
-            "payment_methods": payments.values("method").annotate(
-                total=Sum("amount"), count=Count("id")
+            "payment_methods": list(
+                payments.values("method").annotate(
+                    total=Sum("amount"), count=Count("id")
+                )
             ),
         }
 
     def get_recent_payments(self):
-        user = self.request.user
-        payments = Payment.objects.filter(
-            payment_status=PaymentStatusChoices.COMPLETED, school=user.school
-        ).order_by("-paid_at")[:10]
-
+        school = _school(self.request)
+        payments = (
+            Payment.objects.filter(
+                payment_status=PaymentStatusChoices.COMPLETED, school=school
+            )
+            .order_by("-paid_at")[:10]
+        )
         return PaymentListSerializer(payments, many=True).data
 
     def get_overdue_invoices(self):
-        user = self.request.user
-        overdue = FeeInvoice.objects.filter(
-            due_date__lt=timezone.now().date(),
-            invoice_status__in=[InvoiceStatusChoices.ISSUED, InvoiceStatusChoices.PARTIALLY_PAID],
-            school=user.school,
-        ).order_by("due_date")[:10]
-
+        school = _school(self.request)
+        overdue = (
+            FeeInvoice.objects.filter(
+                due_date__lt=timezone.now().date(),
+                invoice_status__in=[
+                    InvoiceStatusChoices.ISSUED,
+                    InvoiceStatusChoices.PARTIALLY_PAID,
+                ],
+                school=school,
+            )
+            .order_by("due_date")[:10]
+        )
         return FeeInvoiceListSerializer(overdue, many=True).data
 
     def get_pending_bursaries(self):
-        user = self.request.user
-        pending = Bursary.objects.filter(
-            bursary_status=BursaryStatusChoices.APPLIED, school=user.school
-        ).order_by("-created_at")[:5]
-
+        school = _school(self.request)
+        pending = (
+            Bursary.objects.filter(
+                bursary_status=BursaryStatusChoices.APPLIED, school=school
+            )
+            .order_by("-created_at")[:5]
+        )
         return BursaryDetailSerializer(pending, many=True).data
 
 
-class FinanceStatisticsView(generics.GenericAPIView):
-    """Finance statistics"""
-
-    permission_classes = [IsAuthenticated]
-    serializer_class = FinanceDashboardSerializer
-    queryset = FinancialTransaction.objects.none()
-
-    def post(self, request):
-        """Get financial statistics"""
-        serializer = FinanceDashboardSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        stats = serializer.get_statistics()
-        return Response(stats)
-
-
 class StudentFinanceView(generics.GenericAPIView):
-    """Student finance summary"""
-
     permission_classes = [IsAuthenticated]
     serializer_class = StudentFinanceSummarySerializer
     queryset = FeeInvoice.objects.none()
 
     def get(self, request):
-        """Get student finance summary"""
         student_id = request.query_params.get("student")
 
         if not student_id:
-            # If user is a student, use their own ID
-            user = request.user
-            if hasattr(user, "student_profile"):
-                student_id = user.student_profile.id
+            if hasattr(request.user, "student_profile"):
+                student_id = str(request.user.student_profile.id)
             else:
-                return Response({"error": "student parameter required"}, status=400)
+                return Response(
+                    {"error": "student parameter required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         serializer = StudentFinanceSummarySerializer(data={"student_id": student_id})
         serializer.is_valid(raise_exception=True)
@@ -553,18 +856,20 @@ class StudentFinanceView(generics.GenericAPIView):
 
     def post(self, request):
         student_id = request.data.get("student")
-
         if not student_id:
-            return Response({"error": "student parameter required"}, status=400)
+            return Response(
+                {"error": "student parameter required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        user = request.user
-
+        school = _school(request)
         invoices = FeeInvoice.objects.filter(
-            student_id=student_id, school=user.school
+            student_id=student_id, school=school
         ).order_by("-issue_date")
-
         payments = Payment.objects.filter(
-            student_id=student_id, payment_status=PaymentStatusChoices.COMPLETED, school=user.school
+            student_id=student_id,
+            payment_status=PaymentStatusChoices.COMPLETED,
+            school=school,
         ).order_by("-paid_at")
 
         return Response(
@@ -581,79 +886,68 @@ class StudentFinanceView(generics.GenericAPIView):
             }
         )
 
+# Reports
 
-#  REPORT VIEWS
 class FinanceReportView(generics.GenericAPIView):
-    """Finance reports"""
-
     permission_classes = [IsAuthenticated]
     serializer_class = FinanceReportSerializer
     queryset = FeeInvoice.objects.none()
 
     def post(self, request):
-        """Generate finance report"""
         report_type = request.data.get("type", "revenue")
         start_date = request.data.get("start_date")
         end_date = request.data.get("end_date")
-        format = request.data.get("format", "json")
 
         if not start_date or not end_date:
-            return Response({"error": "start_date and end_date required"}, status=400)
+            return Response(
+                {"error": "start_date and end_date required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        school = _school(request)
 
         if report_type == "revenue":
-            report = self.generate_revenue_report(start_date, end_date)
+            report = self._revenue_report(start_date, end_date, school)
         elif report_type == "invoices":
-            report = self.generate_invoice_report(start_date, end_date)
+            report = self._invoice_report(start_date, end_date, school)
         elif report_type == "payments":
-            report = self.generate_payment_report(start_date, end_date)
+            report = self._payment_report(start_date, end_date, school)
         elif report_type == "students":
-            report = self.generate_student_report(start_date, end_date)
+            report = self._student_report(start_date, end_date, school)
         else:
-            return Response({"error": "Invalid report type"}, status=400)
+            return Response(
+                {"error": "Invalid report type"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         return Response(report)
 
-    def generate_revenue_report(self, start_date, end_date):
-        """Generate revenue report"""
+    def _revenue_report(self, start_date, end_date, school):
         payments = Payment.objects.filter(
-            paid_at__date__range=[start_date, end_date], payment_status=PaymentStatusChoices.COMPLETED
+            paid_at__date__range=[start_date, end_date],
+            payment_status=PaymentStatusChoices.COMPLETED,
+            school=school,
         )
-
-        revenue_by_method = payments.values("method").annotate(
-            total=Sum("amount"), count=Count("id")
-        )
-
-        revenue_by_day = (
-            payments.values("paid_at__date")
-            .annotate(total=Sum("amount"), count=Count("id"))
-            .order_by("paid_at__date")
-        )
-
         return {
             "report_type": "revenue",
             "period": f"{start_date} to {end_date}",
             "total_revenue": payments.aggregate(Sum("amount"))["amount__sum"] or 0,
             "total_transactions": payments.count(),
-            "revenue_by_method": list(revenue_by_method),
-            "revenue_by_day": list(revenue_by_day),
+            "revenue_by_method": list(
+                payments.values("method").annotate(
+                    total=Sum("amount"), count=Count("id")
+                )
+            ),
+            "revenue_by_day": list(
+                payments.values("paid_at__date")
+                .annotate(total=Sum("amount"), count=Count("id"))
+                .order_by("paid_at__date")
+            ),
         }
 
-    def generate_invoice_report(self, start_date, end_date):
-        """Generate invoice report"""
-        invoices = FeeInvoice.objects.filter(issue_date__range=[start_date, end_date])
-
-        invoices_by_status = invoices.values("invoice_status").annotate(
-            total_amount=Sum("total_amount"),
-            total_balance=Sum("balance"),
-            count=Count("id"),
+    def _invoice_report(self, start_date, end_date, school):
+        invoices = FeeInvoice.objects.filter(
+            issue_date__range=[start_date, end_date], school=school
         )
-
-        invoices_by_class = invoices.values("student__current_class__level").annotate(
-            total_amount=Sum("total_amount"),
-            total_balance=Sum("balance"),
-            count=Count("id"),
-        )
-
         return {
             "report_type": "invoices",
             "period": f"{start_date} to {end_date}",
@@ -664,43 +958,47 @@ class FinanceReportView(generics.GenericAPIView):
             "total_outstanding": invoices.aggregate(Sum("balance"))["balance__sum"]
             or 0,
             "total_invoices": invoices.count(),
-            "invoices_by_status": list(invoices_by_status),
-            "invoices_by_class": list(invoices_by_class),
+            "invoices_by_status": list(
+                invoices.values("invoice_status").annotate(
+                    total_amount=Sum("total_amount"),
+                    total_balance=Sum("balance"),
+                    count=Count("id"),
+                )
+            ),
         }
 
-    def generate_payment_report(self, start_date, end_date):
-        """Generate payment report"""
+    def _payment_report(self, start_date, end_date, school):
         payments = Payment.objects.filter(
-            paid_at__date__range=[start_date, end_date], payment_status=PaymentStatusChoices.COMPLETED
+            paid_at__date__range=[start_date, end_date],
+            payment_status=PaymentStatusChoices.COMPLETED,
+            school=school,
         )
-
-        payments_by_method = payments.values("method").annotate(
-            total=Sum("amount"), count=Count("id")
-        )
-
-        top_payers = (
-            payments.values(
-                "student__admission_number",
-                "student__user__first_name",
-                "student__user__last_name",
-            )
-            .annotate(total=Sum("amount"), count=Count("id"))
-            .order_by("-total")[:10]
-        )
-
         return {
             "report_type": "payments",
             "period": f"{start_date} to {end_date}",
             "total_payments": payments.aggregate(Sum("amount"))["amount__sum"] or 0,
             "payment_count": payments.count(),
-            "payments_by_method": list(payments_by_method),
-            "top_payers": list(top_payers),
+            "payments_by_method": list(
+                payments.values("method").annotate(
+                    total=Sum("amount"), count=Count("id")
+                )
+            ),
+            "top_payers": list(
+                payments.values(
+                    "student__admission_number",
+                    "student__user__first_name",
+                    "student__user__last_name",
+                )
+                .annotate(total=Sum("amount"), count=Count("id"))
+                .order_by("-total")[:10]
+            ),
         }
 
-    def generate_student_report(self, start_date, end_date):
-        """Generate student finance report"""
+    def _student_report(self, start_date, end_date, school):
         students = (
-            FeeInvoice.objects.filter(issue_date__range=[start_date, end_date])
+            FeeInvoice.objects.filter(
+                issue_date__range=[start_date, end_date], school=school
+            )
             .values(
                 "student__admission_number",
                 "student__user__first_name",
@@ -715,7 +1013,6 @@ class FinanceReportView(generics.GenericAPIView):
             )
             .order_by("-total_balance")
         )
-
         return {
             "report_type": "students",
             "period": f"{start_date} to {end_date}",
@@ -724,34 +1021,28 @@ class FinanceReportView(generics.GenericAPIView):
             "student_details": list(students),
         }
 
-
-#  MPESA CALLBACK VIEW
 class MpesaCallbackView(generics.GenericAPIView):
-    """MPesa payment callback handler"""
+    """
+    Safaricom Daraja STK / C2B callback endpoint.
+    No authentication – Safaricom calls this URL directly.
+    """
 
-    permission_classes = []
+    permission_classes = [AllowAny]
     serializer_class = MpesaCallbackSerializer
     queryset = Payment.objects.none()
+    authentication_classes = []  # Explicitly disable all auth
 
-    def post(self, request):
-        """Handle MPesa callback"""
+    def post(self, request, *args, **kwargs):
+        logger.info("M-Pesa callback received: %s", request.data)
+
         try:
-            data = request.data
-
-            # Extract payment details from MPesa callback
-            mpesa_code = data.get("MpesaReceiptNumber")
-            phone = data.get("PhoneNumber")
-            amount = data.get("Amount")
-            transaction_date = data.get("TransactionDate")
-
-            # TODO: Implement MPesa callback processing
-            # This would typically involve:
-            # 1. Validating the callback
-            # 2. Finding the associated invoice
-            # 3. Creating a payment record
-            # 4. Updating the invoice balance
-
-            return Response({"ResultCode": 0, "ResultDesc": "Success"})
-
+            service = MpesaService()
+            result = service.handle_stk_callback(request.data)
+            return Response(result, status=status.HTTP_200_OK)
         except Exception as e:
-            return Response({"ResultCode": 1, "ResultDesc": str(e)})
+            logger.exception("Unhandled error in M-Pesa callback")
+            # Always return ResultCode 0 so Safaricom stops retrying
+            return Response(
+                {"ResultCode": 0, "ResultDesc": f"Accepted with internal error: {e}"},
+                status=status.HTTP_200_OK,
+            )

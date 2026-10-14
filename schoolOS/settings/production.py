@@ -4,7 +4,7 @@ Production settings.
 
 from .base import *
 
-DEBUG = True
+DEBUG = False
 
 # Security hardening
 SECURE_SSL_REDIRECT = True

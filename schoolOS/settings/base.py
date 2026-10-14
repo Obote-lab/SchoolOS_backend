@@ -286,6 +286,22 @@ ROLLBAR = {
     'root': BASE_DIR,
 }
 
-print("DEBUG =", settings.DEBUG)
-print("MEDIA_ROOT =", settings.MEDIA_ROOT)
-print("MEDIA_URL =", settings.MEDIA_URL)
+
+#  M-PESA DARAJA
+MPESA_ENVIRONMENT = config("MPESA_ENVIRONMENT", default="sandbox")  # sandbox | production
+
+MPESA_CONSUMER_KEY = config("MPESA_CONSUMER_KEY")
+MPESA_CONSUMER_SECRET = config("MPESA_CONSUMER_SECRET")
+MPESA_SHORTCODE = config("MPESA_SHORTCODE", default="174379")
+MPESA_PASSKEY = config("MPESA_PASSKEY")
+MPESA_EXPRESS_SHORTCODE = config("MPESA_EXPRESS_SHORTCODE", default="174379")
+
+# Full public URL that Safaricom will call
+MPESA_CALLBACK_URL = config(
+    "MPESA_CALLBACK_URL",
+    default="https://your-domain.com/api/finance/mpesa-callback/",
+)
+
+MPESA_TRANSACTION_TYPE = config(
+    "MPESA_TRANSACTION_TYPE", default="CustomerPayBillOnline"
+)  # or CustomerBuyGoodsOnline

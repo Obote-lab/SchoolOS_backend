@@ -1,9 +1,12 @@
 import logging
+from decimal import Decimal
+
 from django.db import transaction
-from django.db.models.signals import post_save, pre_save
+from django.db.models import F, Sum
+from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
+
 from core.audit import create_audit_log
-from core.choices.identity import AuditActionChoices
 from core.choices.finance import (
     BursaryStatusChoices,
     FinanceCategoryChoices,
@@ -12,12 +15,39 @@ from core.choices.finance import (
     PaymentStatusChoices,
     TransactionTypeChoices,
 )
+from core.choices.identity import AuditActionChoices
 
-from .models import Bursary, FeeInvoice, FinancialTransaction, Payment
+from .models import (
+    Bursary,
+    FeeInvoice,
+    FinancialTransaction,
+    InvoiceItem,
+    Payment,
+    PaymentAllocation,
+)
 
 logger = logging.getLogger(__name__)
 
 
+# Helpers
+
+def _recalculate_invoice_from_allocations(invoice: FeeInvoice) -> None:
+    """
+    Recompute amount_paid from PaymentAllocation records that belong to
+    COMPLETED payments, then let the invoice recalculate balance/status.
+    """
+    total_allocated = (
+        PaymentAllocation.objects.filter(
+            invoice=invoice,
+            payment__payment_status=PaymentStatusChoices.COMPLETED,
+        ).aggregate(total=Sum("amount"))["total"]
+        or Decimal("0")
+    )
+    invoice.amount_paid = total_allocated
+    invoice.recalculate_totals(save=True)
+
+
+# FeeInvoice
 @receiver(post_save, sender=FeeInvoice)
 def log_invoice_creation(sender, instance: FeeInvoice, created: bool, **kwargs):
     if not created:
@@ -36,75 +66,124 @@ def log_invoice_creation(sender, instance: FeeInvoice, created: bool, **kwargs):
     )
 
 
+# InvoiceItem → keep invoice totals in sync
+@receiver(post_save, sender=InvoiceItem)
+@receiver(post_delete, sender=InvoiceItem)
+def sync_invoice_totals_on_item_change(sender, instance: InvoiceItem, **kwargs):
+    """Whenever a line item is added/changed/deleted, recalculate the parent invoice."""
+    invoice = instance.invoice
+    if invoice:
+        invoice.recalculate_totals(save=True)
+
+
+# PaymentAllocation → keep invoice amount_paid in sync
+
+@receiver(post_save, sender=PaymentAllocation)
+@receiver(post_delete, sender=PaymentAllocation)
+def sync_invoice_on_allocation_change(sender, instance: PaymentAllocation, **kwargs):
+    """Recalculate the target invoice whenever an allocation is created or removed."""
+    if instance.invoice_id:
+        try:
+            invoice = FeeInvoice.objects.get(pk=instance.invoice_id)
+            _recalculate_invoice_from_allocations(invoice)
+        except FeeInvoice.DoesNotExist:
+            pass
+
+
+# Payment → ledger + invoice update (idempotent)
+
 @receiver(post_save, sender=Payment)
 def update_invoice_and_ledger_on_payment(sender, instance: Payment, created: bool, **kwargs):
     """
-    Post to invoice + GL only when payment is COMPLETED and not yet ledger_posted.
-    Works for create-as-COMPLETED and later transition to COMPLETED (if you save again).
+    When a payment becomes COMPLETED:
+
+    1. If it has allocations → rely on PaymentAllocation signals to update invoices.
+    2. If it has a direct invoice link and no allocations yet → create a default
+       allocation (backward-compatible behaviour).
+    3. Post to the General Ledger once (ledger_posted flag).
+    4. Write an audit log.
     """
     if instance.payment_status != PaymentStatusChoices.COMPLETED:
         return
 
-    # Idempotency (requires Payment.ledger_posted field)
+    # Already processed
     if getattr(instance, "ledger_posted", False):
         return
 
     try:
         with transaction.atomic():
-            # Re-fetch under lock
-            payment = (Payment.objects.select_for_update().filter(pk=instance.pk).first())
+            payment = (
+                Payment.objects.select_for_update()
+                .filter(pk=instance.pk)
+                .first()
+            )
             if not payment or payment.ledger_posted:
                 return
             if payment.payment_status != PaymentStatusChoices.COMPLETED:
                 return
 
-            invoice = (
-                FeeInvoice.objects.select_for_update()
-                .filter(pk=payment.invoice_id)
-                .first()
-            )
-            if not invoice:
-                logger.error("Payment %s has no invoice", payment.pk)
-                return
+            # 1. Ensure at least one allocation exists (legacy path)
+            has_allocations = payment.allocations.exists()
 
-            old_balance = invoice.balance
-            invoice.amount_paid = (invoice.amount_paid or 0) + payment.amount
-            invoice.save()  # recalculates balance/status (DRAFT left alone if still draft)
+            if not has_allocations and payment.invoice_id:
+                # Auto-create a full allocation to the linked invoice
+                PaymentAllocation.objects.create(
+                    payment=payment,
+                    invoice_id=payment.invoice_id,
+                    amount=payment.amount,
+                    notes="Auto-allocated on completion",
+                )
+                # The PaymentAllocation post_save will update the invoice
 
+            # 2. Post to General Ledger (once)
             FinancialTransaction.objects.create(
                 school=payment.school,
                 transaction_type=TransactionTypeChoices.INCOME,
                 finance_category=FinanceCategoryChoices.FEES,
                 amount=payment.amount,
                 description=(
-                    f"Payment {payment.payment_reference} "
-                    f"for invoice {invoice.invoice_number}"
+                    f"Payment {payment.payment_reference}"
+                    + (
+                        f" for invoice {payment.invoice.invoice_number}"
+                        if payment.invoice_id
+                        else ""
+                    )
                 ),
                 reference_number=payment.payment_reference,
-                account_debit="1100",
-                account_credit="4100",
+                account_debit="1100",   # Cash / Bank / M-Pesa
+                account_credit="4100",  # Fee Income
                 approved_by=payment.verified_by or payment.received_by,
                 transaction_status=FinanceTransactionStatusChoices.POSTED,
             )
 
             Payment.objects.filter(pk=payment.pk).update(ledger_posted=True)
 
+            # 3. Audit
             create_audit_log(
                 actor=payment.received_by,
-                action=AuditActionChoices.CREATE,
+                action=AuditActionChoices.CREATE if created else AuditActionChoices.UPDATE,
                 model_name="Payment",
                 record_id=payment.id,
                 school=payment.school,
                 reason=(
-                    f"Payment of {payment.amount} received – "
-                    f"invoice balance {old_balance} → {invoice.balance}"
+                    f"Payment of KES {payment.amount} marked COMPLETED "
+                    f"({payment.get_method_display()})"
+                    + (
+                        f" – M-Pesa receipt {payment.mpesa_receipt}"
+                        if payment.mpesa_receipt
+                        else ""
+                    )
                 ),
                 new_value=payment.payment_reference,
             )
+
     except Exception:
-        logger.exception("Failed payment→invoice/ledger update for %s", instance.pk)
+        logger.exception(
+            "Failed payment→invoice/ledger update for Payment %s", instance.pk
+        )
 
 
+# Bursary → apply to open invoice on approval
 @receiver(pre_save, sender=Bursary)
 def bursary_store_previous_status(sender, instance: Bursary, **kwargs):
     if not instance.pk:
@@ -120,27 +199,30 @@ def bursary_store_previous_status(sender, instance: Bursary, **kwargs):
 @receiver(post_save, sender=Bursary)
 def apply_bursary_on_approval(sender, instance: Bursary, **kwargs):
     """
-    Apply bursary to open invoice only on transition → APPROVED,
-    and only once (applied_to_invoice is null).
+    Apply bursary amount to an open invoice only on transition → APPROVED,
+    and only once (applied_to_invoice is still null).
     """
     if instance.bursary_status != BursaryStatusChoices.APPROVED:
         return
 
     prev = getattr(instance, "_previous_bursary_status", None)
-    # Allow first save already APPROVED (created as approved)
+    # Skip if it was already APPROVED
     if prev is not None and prev == BursaryStatusChoices.APPROVED:
         return
 
     if not instance.amount_awarded or instance.amount_awarded <= 0:
         return
 
-    # Idempotency (requires Bursary.applied_to_invoice field)
     if getattr(instance, "applied_to_invoice_id", None):
         return
 
     try:
         with transaction.atomic():
-            bursary = Bursary.objects.select_for_update().filter(pk=instance.pk).first()
+            bursary = (
+                Bursary.objects.select_for_update()
+                .filter(pk=instance.pk)
+                .first()
+            )
             if not bursary or bursary.applied_to_invoice_id:
                 return
 
@@ -166,8 +248,10 @@ def apply_bursary_on_approval(sender, instance: Bursary, **kwargs):
                 )
                 return
 
-            invoice.bursary_amount = (invoice.bursary_amount or 0) + bursary.amount_awarded
-            invoice.save()
+            invoice.bursary_amount = (
+                (invoice.bursary_amount or Decimal("0")) + bursary.amount_awarded
+            )
+            invoice.recalculate_totals(save=True)
 
             FinancialTransaction.objects.create(
                 school=bursary.school,
