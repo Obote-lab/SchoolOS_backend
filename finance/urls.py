@@ -11,6 +11,7 @@ from .api.viewsets import (
     MpesaCallbackView,
     PaymentPlanViewSet,
     PaymentViewSet,
+    SchoolPaymentAccountViewSet,
     StudentFinanceView,
 )
 
@@ -23,11 +24,11 @@ router.register(r"payments", PaymentViewSet, basename="payment")
 router.register(r"payment-plans", PaymentPlanViewSet, basename="payment-plan")
 router.register(r"bursaries", BursaryViewSet, basename="bursary")
 router.register(r"transactions", FinancialTransactionViewSet, basename="transaction")
+router.register(r"payment-accounts",SchoolPaymentAccountViewSet,basename="payment-account")
 
 urlpatterns = [
     # Router endpoints
     path("", include(router.urls)),
-
     # Custom views
     path("dashboard/", FinanceDashboardView.as_view(), name="finance-dashboard"),
     path("student-finance/", StudentFinanceView.as_view(), name="student-finance"),

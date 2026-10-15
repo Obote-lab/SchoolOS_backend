@@ -6,8 +6,12 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from core.choices.finance import PaymentMethodChoices, PaymentStatusChoices
-from finance.models import Payment
+from core.choices.finance import (
+    PaymentAccountTypeChoices,
+    PaymentMethodChoices,
+    PaymentStatusChoices,
+)
+from finance.models import Payment, SchoolPaymentAccount
 from finance.services.mpesa_utils import (
     generate_password,
     generate_timestamp,
@@ -18,30 +22,57 @@ logger = logging.getLogger(__name__)
 
 
 class MpesaError(Exception):
-    """Custom exception for M-Pesa related errors"""
+    """Custom exception for M-Pesa related errors."""
+
     pass
 
 
 class MpesaService:
     """
     Safaricom Daraja API client + business logic for SchoolOS.
+
+    Uses the school's own Paybill/Till (SchoolPaymentAccount) when available.
+    Falls back to platform / sandbox credentials otherwise.
     """
 
-    def __init__(self):
+    def __init__(self, payment_account=None, school=None):
         self.environment = getattr(settings, "MPESA_ENVIRONMENT", "sandbox")
         self.consumer_key = settings.MPESA_CONSUMER_KEY
         self.consumer_secret = settings.MPESA_CONSUMER_SECRET
-        self.shortcode = settings.MPESA_SHORTCODE
-        self.passkey = settings.MPESA_PASSKEY
         self.callback_url = settings.MPESA_CALLBACK_URL
-        self.transaction_type = getattr(
-            settings, "MPESA_TRANSACTION_TYPE", "CustomerPayBillOnline"
-        )
+
+        self.payment_account = payment_account
+        if not self.payment_account and school:
+            self.payment_account = SchoolPaymentAccount.get_default_for_school(
+                school,
+                account_types=[
+                    PaymentAccountTypeChoices.PAYBILL,
+                    PaymentAccountTypeChoices.TILL,
+                ],
+            )
+
+        self._apply_account_credentials()
 
         if self.environment == "production":
             self.base_url = "https://api.safaricom.co.ke"
         else:
             self.base_url = "https://sandbox.safaricom.co.ke"
+
+    def _apply_account_credentials(self):
+        """Set shortcode / passkey / transaction_type from account or settings."""
+        if self.payment_account and self.payment_account.shortcode:
+            self.shortcode = self.payment_account.shortcode
+            self.passkey = self.payment_account.passkey or settings.MPESA_PASSKEY
+            self.transaction_type = (
+                self.payment_account.transaction_type
+                or "CustomerPayBillOnline"
+            )
+        else:
+            self.shortcode = settings.MPESA_SHORTCODE
+            self.passkey = settings.MPESA_PASSKEY
+            self.transaction_type = getattr(
+                settings, "MPESA_TRANSACTION_TYPE", "CustomerPayBillOnline"
+            )
 
     # Auth
     def get_access_token(self) -> str:
@@ -74,13 +105,26 @@ class MpesaService:
         """
         Initiate Lipa Na M-Pesa Online (STK Push).
 
+        Uses the school's default Paybill/Till when available.
         Returns the created Payment record (status=PENDING).
         """
         phone = normalize_phone(phone)
-        amount = Decimal(amount).quantize(Decimal("1"))  # M-Pesa expects whole shillings
+        amount = Decimal(amount).quantize(Decimal("1"))  # whole shillings
 
         if amount < 1:
             raise MpesaError("Amount must be at least KES 1")
+
+        # Resolve school payment account if we still don't have one
+        resolved_school = school or (invoice.school if invoice else None)
+        if not self.payment_account and resolved_school:
+            self.payment_account = SchoolPaymentAccount.get_default_for_school(
+                resolved_school,
+                account_types=[
+                    PaymentAccountTypeChoices.PAYBILL,
+                    PaymentAccountTypeChoices.TILL,
+                ],
+            )
+            self._apply_account_credentials()
 
         timestamp = generate_timestamp()
         password = generate_password(self.shortcode, self.passkey, timestamp)
@@ -96,8 +140,8 @@ class MpesaService:
             "PartyB": self.shortcode,
             "PhoneNumber": phone,
             "CallBackURL": self.callback_url,
-            "AccountReference": account_reference[:12],  # max 12 chars
-            "TransactionDesc": transaction_desc[:13],    # max 13 chars
+            "AccountReference": account_reference[:12],
+            "TransactionDesc": transaction_desc[:13],
         }
 
         url = f"{self.base_url}/mpesa/stkpush/v1/processrequest"
@@ -113,21 +157,26 @@ class MpesaService:
             logger.exception("STK Push request failed")
             raise MpesaError(f"STK Push request failed: {e}") from e
 
-        # Safaricom returns ResponseCode "0" on success
         if str(data.get("ResponseCode")) != "0":
-            error_msg = data.get("ResponseDescription") or data.get("errorMessage") or str(data)
+            error_msg = (
+                data.get("ResponseDescription")
+                or data.get("errorMessage")
+                or str(data)
+            )
             logger.error("STK Push rejected by Safaricom: %s", data)
             raise MpesaError(error_msg)
 
         checkout_request_id = data.get("CheckoutRequestID", "")
         merchant_request_id = data.get("MerchantRequestID", "")
 
-        # Create PENDING payment record
+        resolved_student = student or (invoice.student if invoice else None)
+
         with transaction.atomic():
             payment = Payment.objects.create(
                 invoice=invoice,
-                student=student or (invoice.student if invoice else None),
-                school=school or (invoice.school if invoice else None),
+                student=resolved_student,
+                school=resolved_school,
+                payment_account=self.payment_account,  # link to school account
                 amount=amount,
                 method=PaymentMethodChoices.MPESA,
                 payment_status=PaymentStatusChoices.PENDING,
@@ -140,39 +189,20 @@ class MpesaService:
             )
 
         logger.info(
-            "STK Push initiated | Payment=%s | CheckoutRequestID=%s | Phone=%s | Amount=%s",
+            "STK Push initiated | Payment=%s | Shortcode=%s | Checkout=%s | Phone=%s | Amount=%s",
             payment.payment_reference,
+            self.shortcode,
             checkout_request_id,
             phone,
             amount,
         )
         return payment
 
-
     # Callback handler (idempotent)
     def handle_stk_callback(self, payload: dict) -> dict:
         """
         Process the STK callback from Safaricom.
-
-        Expected structure (simplified):
-        {
-            "Body": {
-                "stkCallback": {
-                "MerchantRequestID": "...",
-                "CheckoutRequestID": "...",
-                "ResultCode": 0,
-                "ResultDesc": "The service request is processed successfully.",
-                "CallbackMetadata": {
-                    "Item": [
-                    {"Name": "Amount", "Value": 1.00},
-                    {"Name": "MpesaReceiptNumber", "Value": "xxxxx"},
-                    {"Name": "TransactionDate", "Value": 20261014214500},
-                    {"Name": "PhoneNumber", "Value": 2547xxxxxxx}
-                    ]
-                }
-                }
-            }
-        }
+        Idempotent – safe to receive the same callback more than once.
         """
         try:
             body = payload.get("Body", {})
@@ -195,27 +225,31 @@ class MpesaService:
 
                 if not payment:
                     logger.error(
-                        "No Payment found for CheckoutRequestID=%s", checkout_request_id
+                        "No Payment found for CheckoutRequestID=%s",
+                        checkout_request_id,
                     )
-                    return {"ResultCode": 0, "ResultDesc": "Accepted (no matching payment)"}
+                    return {
+                        "ResultCode": 0,
+                        "ResultDesc": "Accepted (no matching payment)",
+                    }
 
                 # Already processed?
                 if payment.payment_status == PaymentStatusChoices.COMPLETED:
                     logger.info(
-                        "Callback already processed for %s", payment.payment_reference
+                        "Callback already processed for %s",
+                        payment.payment_reference,
                     )
                     return {"ResultCode": 0, "ResultDesc": "Already processed"}
 
-                # Store raw payload for audit
                 payment.mpesa_callback_raw = payload
                 payment.mpesa_result_code = str(result_code)
                 payment.mpesa_result_desc = result_desc
 
                 if str(result_code) == "0":
-                    # Success – extract metadata
                     metadata = {}
                     items = (
-                        stk_callback.get("CallbackMetadata", {}).get("Item", []) or []
+                        stk_callback.get("CallbackMetadata", {}).get("Item", [])
+                        or []
                     )
                     for item in items:
                         name = item.get("Name")
@@ -223,10 +257,13 @@ class MpesaService:
                         if name:
                             metadata[name] = value
 
-                    payment.mpesa_receipt = str(metadata.get("MpesaReceiptNumber", ""))
-                    payment.mpesa_phone = str(metadata.get("PhoneNumber", payment.mpesa_phone))
+                    payment.mpesa_receipt = str(
+                        metadata.get("MpesaReceiptNumber", "")
+                    )
+                    payment.mpesa_phone = str(
+                        metadata.get("PhoneNumber", payment.mpesa_phone)
+                    )
                     payment.payment_status = PaymentStatusChoices.COMPLETED
-                    # amount should already match, but we can double-check if needed
 
                     payment.save(
                         update_fields=[
@@ -239,18 +276,18 @@ class MpesaService:
                             "updated_at",
                         ]
                     )
-                    # Signals will now:
+                    # Signals will:
                     # 1. Create PaymentAllocation
                     # 2. Update invoice balance
                     # 3. Post to General Ledger
 
                     logger.info(
-                        "Payment COMPLETED via STK | %s | Receipt=%s",
+                        "Payment COMPLETED via STK | %s | Receipt=%s | Account=%s",
                         payment.payment_reference,
                         payment.mpesa_receipt,
+                        getattr(payment.payment_account, "shortcode", None),
                     )
                 else:
-                    # Failed / cancelled by user
                     payment.payment_status = PaymentStatusChoices.FAILED
                     payment.save(
                         update_fields=[
@@ -272,5 +309,5 @@ class MpesaService:
 
         except Exception as e:
             logger.exception("Error processing STK callback")
-            # Still return 0 so Safaricom does not keep retrying
+            # Always return 0 so Safaricom stops retrying
             return {"ResultCode": 0, "ResultDesc": f"Accepted with error: {e}"}

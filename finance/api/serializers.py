@@ -24,6 +24,7 @@ from ..models import (
     Payment,
     PaymentAllocation,
     PaymentPlan,
+    SchoolPaymentAccount,
 )
 
 
@@ -583,7 +584,6 @@ class StudentFinanceSummarySerializer(serializers.Serializer):
 
 
 # Dashboard / Report / M-Pesa stubs (kept simple)
-
 class FinanceTodayStatsSerializer(serializers.Serializer):
     date = serializers.DateField()
     total_collected = serializers.DecimalField(max_digits=12, decimal_places=2)
@@ -659,3 +659,71 @@ class StkPushSerializer(serializers.Serializer):
         if not cleaned.isdigit() or len(cleaned) < 9:
             raise serializers.ValidationError("Enter a valid Kenyan phone number.")
         return value
+
+
+
+class SchoolPaymentAccountSerializer(serializers.ModelSerializer):
+    account_type_display = serializers.CharField(source="get_account_type_display", read_only=True)
+    verification_status_display = serializers.CharField(source="get_verification_status_display", read_only=True)
+
+    class Meta:
+        model = SchoolPaymentAccount
+        fields = [
+            "id",
+            "school",
+            "account_type",
+            "account_type_display",
+            "label",
+            "shortcode",
+            "transaction_type",
+            "bank_name",
+            "bank_code",
+            "account_number",
+            "account_name",
+            "branch_name",
+            "is_default",
+            "is_active",
+            "verification_status",
+            "verification_status_display",
+            "verified_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "verification_status",
+            "verified_at",
+            "created_at",
+            "updated_at",
+        ]
+        extra_kwargs = {
+            "passkey": {"write_only": True},  # never return passkey in responses
+        }
+
+
+class SchoolPaymentAccountCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchoolPaymentAccount
+        fields = [
+            "account_type",
+            "label",
+            "shortcode",
+            "passkey",
+            "transaction_type",
+            "bank_name",
+            "bank_code",
+            "account_number",
+            "account_name",
+            "branch_name",
+            "is_default",
+            "is_active",
+            "notes",
+        ]
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        school = getattr(request, "school", None) or request.user.school
+        validated_data["school"] = school
+        validated_data["created_by"] = request.user
+        return super().create(validated_data)

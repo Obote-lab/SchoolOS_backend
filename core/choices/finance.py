@@ -109,4 +109,23 @@ class FinanceTransactionStatusChoices(models.TextChoices):
     APPROVED = "approved", _("Approved")
     POSTED = "posted", _("Posted")
     REJECTED = "rejected", _("Rejected")
-    
+
+
+class PaymentAccountTypeChoices(models.TextChoices):
+    PAYBILL = "paybill", _("M-Pesa Paybill")
+    TILL = "till", _("M-Pesa Till / Buy Goods")
+    BANK = "bank", _("Bank Account")
+    MOBILE_MONEY = "mobile_money", _("Other Mobile Money")
+
+
+class PaymentAccountVerificationChoices(models.TextChoices):
+    PENDING = "pending", _("Pending Verification")
+    VERIFIED = "verified", _("Verified")
+    REJECTED = "rejected", _("Rejected")
+
+
+class MpesaTransactionType(models.TextChoices):
+    STK_PUSH = "stk_push", _("STK Push (Lipa Na M-Pesa)")
+    C2B = "c2b", _("Customer to Business")
+    B2C = "b2c", _("Business to Customer")
+    UNKNOWN = "unknown", _("Unknown")

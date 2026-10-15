@@ -15,11 +15,15 @@ from core.choices.finance import (
     FinanceCategoryChoices,
     FinanceTransactionStatusChoices,
     InvoiceStatusChoices,
+    PaymentAccountTypeChoices,
     PaymentFrequencyChoices,
     PaymentMethodChoices,
     PaymentPlanStatusChoices,
     PaymentStatusChoices,
     TransactionTypeChoices,
+    PaymentAccountVerificationChoices,
+    PaymentAccountTypeChoices,
+    MpesaTransactionType
 )
 
 
@@ -268,20 +272,13 @@ class Payment(models.Model):
     Supports Cash, Bank, Cheque and full M-Pesa Daraja (STK Push + C2B).
     """
 
-    class MpesaTransactionType(models.TextChoices):
-        STK_PUSH = "stk_push", _("STK Push (Lipa Na M-Pesa)")
-        C2B = "c2b", _("Customer to Business")
-        B2C = "b2c", _("Business to Customer")
-        UNKNOWN = "unknown", _("Unknown")
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     payment_reference = models.CharField(max_length=100, unique=True, editable=False)
-
     # Core links
     invoice = models.ForeignKey(FeeInvoice,on_delete=models.PROTECT,related_name="payments",null=True,blank=True,help_text=_("Primary invoice this payment is intended for (optional)"),)
     student = models.ForeignKey("students.StudentProfile", on_delete=models.PROTECT)
     school = models.ForeignKey("schools.School", on_delete=models.PROTECT)
-
+    payment_account = models.ForeignKey("SchoolPaymentAccount",on_delete=models.SET_NULL,null=True,blank=True,related_name="payments",help_text=_("Which school account received / was targeted by this payment"),)
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
     method = models.CharField(max_length=30, choices=PaymentMethodChoices.choices)
     paid_at = models.DateTimeField(default=timezone.now)
@@ -294,7 +291,7 @@ class Payment(models.Model):
     bank_ref = models.CharField(max_length=100, blank=True)
     cheque_no = models.CharField(max_length=50, blank=True)
 
-    #  M-Pesa Daraja fields 
+    #  M-Pesa Daraja fields
     mpesa_transaction_type = models.CharField(max_length=20,choices=MpesaTransactionType.choices,blank=True,default=MpesaTransactionType.UNKNOWN,)
     checkout_request_id = models.CharField(max_length=100, blank=True, db_index=True,help_text=_("CheckoutRequestID returned by STK Push"),)
     merchant_request_id = models.CharField(max_length=100, blank=True,help_text=_("MerchantRequestID returned by STK Push"),)
@@ -302,7 +299,6 @@ class Payment(models.Model):
     mpesa_result_code = models.CharField(max_length=10, blank=True)
     mpesa_result_desc = models.CharField(max_length=255, blank=True)
     mpesa_callback_raw = models.JSONField(default=dict, blank=True,help_text=_("Full callback payload from Safaricom for audit"),)
-    # ------------------------------------------
 
     ledger_posted = models.BooleanField(default=False)
     payment_status = models.CharField(max_length=20,choices=PaymentStatusChoices.choices,default=PaymentStatusChoices.PENDING,)
@@ -407,7 +403,6 @@ class PaymentPlan(models.Model):
     student = models.ForeignKey("students.StudentProfile", on_delete=models.CASCADE)
     term = models.ForeignKey("schools.Term", on_delete=models.PROTECT)
     school = models.ForeignKey("schools.School", on_delete=models.PROTECT)
-
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     installment_count = models.PositiveSmallIntegerField(default=1)
     installment_amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -548,3 +543,105 @@ class Receipt(models.Model):
     printed_count = models.PositiveIntegerField(default=0)
     voided = models.BooleanField(default=False)
     void_reason = models.TextField(blank=True)
+
+class SchoolPaymentAccount(models.Model):
+    """
+    Where money for this school should land.
+    Supports M-Pesa Paybill/Till (now) and Bank accounts (soon).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    school = models.ForeignKey( "schools.School",on_delete=models.CASCADE,related_name="payment_accounts",)
+    account_type = models.CharField( max_length=20,choices=PaymentAccountTypeChoices.choices,)
+    label = models.CharField(max_length=100,help_text=_("Friendly name e.g. 'Main Fees Paybill', 'Development Account'"),)
+
+    #  M-Pesa (Paybill / Till)
+    shortcode = models.CharField( max_length=20,blank=True,help_text=_("Paybill or Till number"),)
+    passkey = models.CharField( max_length=255, blank=True, help_text=_("Lipa Na M-Pesa Online Passkey (from Safaricom)"),)
+    transaction_type = models.CharField( max_length=40,blank=True,default="CustomerPayBillOnline",help_text=_("CustomerPayBillOnline or CustomerBuyGoodsOnline"),)
+
+    # Bank (for future bank-to-bank)
+    bank_name = models.CharField(max_length=100, blank=True)
+    bank_code = models.CharField(max_length=20, blank=True)  # e.g. Equity 68
+    account_number = models.CharField(max_length=50, blank=True)
+    account_name = models.CharField(max_length=150, blank=True)
+    branch_name = models.CharField(max_length=100, blank=True)
+
+    #Control
+    is_default = models.BooleanField(default=False,help_text=_("Used for fee payments when no specific account is chosen"),)
+    is_active = models.BooleanField(default=True)
+    verification_status = models.CharField( max_length=20,choices=PaymentAccountVerificationChoices.choices,default=PaymentAccountVerificationChoices.PENDING,)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verified_by = models.ForeignKey( "accounts.CustomUser", on_delete=models.SET_NULL,null=True,blank=True,related_name="payment_accounts_verified",)
+    notes = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey("accounts.CustomUser",on_delete=models.SET_NULL,null=True,related_name="payment_accounts_created",)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_default", "label"]
+        indexes = [
+            models.Index(fields=["school", "is_active", "is_default"]),
+            models.Index(fields=["school", "account_type"]),
+        ]
+        constraints = [
+            # Only one default active account per school
+            models.UniqueConstraint(
+                fields=["school"],
+                condition=models.Q(is_default=True, is_active=True),
+                name="unique_default_payment_account_per_school",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.school} – {self.label} ({self.get_account_type_display()})"
+
+    def clean(self):
+        super().clean()
+        if self.account_type in (
+            PaymentAccountTypeChoices.PAYBILL,
+            PaymentAccountTypeChoices.TILL,
+        ):
+            if not self.shortcode:
+                raise ValidationError({"shortcode": _("Shortcode is required for M-Pesa accounts.")})
+        if self.account_type == PaymentAccountTypeChoices.BANK:
+            if not self.account_number or not self.bank_name:
+                raise ValidationError(_("Bank name and account number are required for bank accounts."))
+
+    def save(self, *args, **kwargs):
+        validate = kwargs.pop("validate", True)
+        if validate:
+            self.full_clean()
+
+        # Ensure only one default
+        if self.is_default and self.is_active:
+            SchoolPaymentAccount.objects.filter(
+                school=self.school, is_default=True
+            ).exclude(pk=self.pk).update(is_default=False)
+
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_default_for_school(cls, school, account_types=None):
+        """
+        Return the default active (and preferably verified) payment account
+        for a school. Optionally filter by account type(s).
+        """
+        qs = cls.objects.filter(school=school, is_active=True)
+        if account_types:
+            qs = qs.filter(account_type__in=account_types)
+
+        # Prefer verified + default
+        account = (
+            qs.filter(
+                is_default=True,
+                verification_status=PaymentAccountVerificationChoices.VERIFIED,
+            ).first()
+            or qs.filter(is_default=True).first()
+            or qs.filter(
+                verification_status=PaymentAccountVerificationChoices.VERIFIED
+            ).first()
+            or qs.first()
+        )
+        return account
