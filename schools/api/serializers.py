@@ -195,11 +195,8 @@ class SchoolCreateSerializer(serializers.ModelSerializer):
     """Create school + principal in one request"""
 
     principal_data = PrincipalCreateDataSerializer(write_only=True)
-    auto_setup_structures = serializers.BooleanField(
-        default=True,
-        write_only=True,
-        help_text="Create academic year (terms via signal) and sample classrooms",
-    )
+    auto_setup_structures = serializers.BooleanField(default=True,write_only=True,help_text="Create academic year (terms via signal) and sample classrooms",)
+    
 
     class Meta:
         model = School
@@ -289,6 +286,7 @@ class SchoolUpdateSerializer(serializers.ModelSerializer):
             "banner",
             "school_settings",
             "is_active",
+            "establishment_year",
         ]
 
     def validate_principal(self, value):
@@ -560,6 +558,7 @@ class SystemSchoolOnboardSerializer(serializers.Serializer):
         if auto_setup:
             SchoolOnboardingService.setup_basic_structures(school, request.user)
         return school
+    
 class SystemBulkOnboardSerializer(serializers.Serializer):
     schools = serializers.ListField(child=serializers.DictField(), min_length=1, required=True)
 

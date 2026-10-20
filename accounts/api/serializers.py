@@ -34,6 +34,7 @@ class UserRoleBasicSerializer(serializers.ModelSerializer):
             "assigned_date",
             "valid_until",
             "is_active",
+            "metadata",
         ]
         read_only_fields = ["role", "school"]
 

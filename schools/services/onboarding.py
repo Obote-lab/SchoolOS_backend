@@ -48,6 +48,7 @@ class SchoolOnboardingService:
         # Defaults
         school_data.setdefault("onboarding_status", OnboardingStatusChoices.PENDING)
         school_data.setdefault("onboarding_progress", 0)
+        school_data.setdefault("school_settings", {})
         school_data["created_by"] = creator
 
         today = timezone.now().date()
@@ -115,6 +116,8 @@ class SchoolOnboardingService:
                 end_date=datetime(next_year, 12, 20).date(),
                 is_current=True,
                 terms_count=3,
+                holidays=[],
+                important_dates={},
                 created_by=creator,
             )
             # Terms are created by academic_year_post_save signal

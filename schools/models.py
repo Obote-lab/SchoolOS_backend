@@ -89,7 +89,7 @@ class School(models.Model):
 
     cdf_eligible = models.BooleanField(default=False)
     bursary_eligible_count = models.IntegerField(default=0)
-    school_settings = models.JSONField(default=dict)
+    school_settings = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -299,8 +299,8 @@ class AcademicYear(models.Model):
     end_date = models.DateField()
     is_current = models.BooleanField(default=False)
     terms_count = models.IntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(4)])
-    holidays = models.JSONField(default=list)
-    important_dates = models.JSONField(default=dict)
+    holidays = models.JSONField(default=list,blank=True, help_text="List of holiday dates in YYYY-MM-DD format")
+    important_dates = models.JSONField(default=dict, blank=True, help_text="Dictionary of important dates with labels, e.g. {'Sports Day': '2024-05-15'}")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -441,7 +441,7 @@ class ClassRoom(models.Model):
     stream = models.CharField(max_length=50, help_text='e.g. "East", "A"')
     classroom_name = models.CharField(max_length=100, blank=True)
 
-    class_teacher = models.ForeignKey( settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="class_teacher_of",)
+    class_teacher = models.ForeignKey( settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,blank=True, related_name="class_teacher_of",)
     assistant_teacher = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.SET_NULL, null=True, blank=True, related_name="assistant_teacher_of",)
 
     capacity = models.IntegerField(default=40, validators=[MinValueValidator(1), MaxValueValidator(100)])
@@ -515,7 +515,7 @@ class Department(models.Model):
     department_name = models.CharField(max_length=100)
     department_code = models.CharField(max_length=20)
 
-    head_of_department = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.SET_NULL,null=True,related_name="headed_departments",)
+    head_of_department = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.SET_NULL,null=True, blank=True,related_name="headed_departments",)
     assistant_hod = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,null=True, blank=True, related_name="assistant_departments",)
 
     department_type = models.CharField(  max_length=30, choices=[("core", "Core"), ("elective", "Elective")], default="core", )
