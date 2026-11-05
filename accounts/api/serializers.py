@@ -86,6 +86,7 @@ class CustomUserSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "last_password_change",
+            "is_superuser",
         ]
 
     @extend_schema_field(OpenApiTypes.STR)

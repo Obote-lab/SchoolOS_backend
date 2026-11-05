@@ -74,6 +74,7 @@ class SystemBrandingViewSet(viewsets.GenericViewSet):
 
     permission_classes = [IsAuthenticated, HasPermission]
     module = "branding"
+    required_scope = "national"
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     queryset = SystemBranding.objects.all()
 
