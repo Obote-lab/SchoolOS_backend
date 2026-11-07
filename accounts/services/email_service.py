@@ -66,23 +66,45 @@ class EmailService:
 
 
     # Welcome
+
     @classmethod
-    def send_welcome_email(cls, user: CustomUser) -> bool:
+    def send_welcome_email(cls,user: CustomUser,temp_password: str | None = None,) -> bool:
         recipient = user.email or user.recovery_email
         if not recipient or not user.get_notification_pref("email"):
             return False
 
+        school_name = (
+            user.school.school_name
+            if getattr(user, "school", None)
+            else "SchoolOS"
+        )
+
+        primary_role = (
+            user.user_roles.filter(is_primary_role=True, is_active=True)
+            .select_related("role")
+            .first()
+        )
+        role_name = (
+            primary_role.role.name
+            if primary_role and primary_role.role
+            else "User"
+        )
+
         context = {
             "user": user,
             "full_name": user.get_full_name(),
-            "school": user.school.school_name if user.school else "SchoolOS",
+            # Template may use either school as string or school.name
+            "school": {"name": school_name},
+            "school_name": school_name,
             "login_id": user.login_id,
+            "temp_password": temp_password,
+            "role_name": role_name,
             "login_url": f"{settings.FRONTEND_URL.rstrip('/')}/login",
             "support_email": settings.DEFAULT_FROM_EMAIL,
         }
 
         return cls._send_email(
-            subject="Welcome to SchoolOS",
+            subject=f"Welcome to {school_name}",
             recipient=recipient,
             html_template="accounts/emails/welcome.html",
             text_template="accounts/emails/welcome.txt",

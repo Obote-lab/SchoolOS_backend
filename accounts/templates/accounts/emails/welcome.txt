@@ -1,19 +1,20 @@
-Welcome to {{ school.name }}
+Welcome to {{ school.name|default:school_name|default:"SchoolOS" }}
 
-Dear {{ user.get_full_name }},
+Dear {{ full_name|default:user.get_full_name|default:user.login_id }},
 
-Your account has been successfully created on the School Management System.
+Your SchoolOS account has been created.
 
-Login Details:
-- Login ID: {{ user.login_id }}
-{% if temp_password %}- Temporary Password: {{ temp_password }}
-  Please change your password after first login.
+Login ID: {{ login_id|default:user.login_id }}
+{% if temp_password %}Temporary password: {{ temp_password }}
+Change this password after your first login.
 {% endif %}
+{% if role_name %}Role: {{ role_name }}
+{% endif %}
+Sign in: {{ login_url }}
 
-Access the system here: {{ login_url }}
+{% if support_email %}Support: {{ support_email }}
+{% endif %}
+Best regards,
+The SchoolOS Team
 
-Your role: {{ user.get_user_type_display }}
-
-If you have any questions, contact the school administration.
-
-© {% now "Y" %} {{ school.name }}
+© {% now "Y" %} {{ school.name|default:school_name|default:"SchoolOS" }}

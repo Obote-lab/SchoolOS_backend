@@ -179,12 +179,11 @@ class CustomUserUpdateSerializer(serializers.ModelSerializer):
 
 class LoginSerializer(serializers.Serializer):
     login_id = serializers.CharField(required=True)
-    password = serializers.CharField(write_only=True, required=True, style={"input_type": "password"})
+    password = serializers.CharField(write_only=True,required=True,style={"input_type": "password"},)
 
     def validate(self, data):
         login_id = data.get("login_id")
         password = data.get("password")
-        request = self.context.get("request")
 
         if not login_id or not password:
             raise serializers.ValidationError("login_id and password required.")
@@ -193,9 +192,14 @@ class LoginSerializer(serializers.Serializer):
         if not user:
             raise serializers.ValidationError("Invalid credentials.")
 
-        if not user.can_authenticate():
+        # Soft gates — allow first login before is_verified
+        if not user.is_active:
+            raise serializers.ValidationError("Account is disabled.")
+        if not user.can_login:
+            raise serializers.ValidationError("Login is not allowed for this account.")
+        if user.is_locked():
             raise serializers.ValidationError(
-                "Account disabled, locked, or unverified."
+                "Account is locked due to failed attempts. Try again later."
             )
 
         if not user.check_password(password):
@@ -204,16 +208,24 @@ class LoginSerializer(serializers.Serializer):
 
         user.reset_failed_logins()
 
-        prefs = user.notification_prefs or {}
+        # Successful login verifies the account
+        update_fields: list[str] = []
+        if not user.is_verified:
+            user.is_verified = True
+            update_fields.append("is_verified")
+
+        prefs = user.notification_prefs
         if not isinstance(prefs, dict):
             prefs = {}
             user.notification_prefs = prefs
-            user.save(update_fields=["notification_prefs"])
+            update_fields.append("notification_prefs")
+
+        if update_fields:
+            user.save(update_fields=update_fields)
 
         data["user"] = user
-        data["must_change_password"] = prefs.get("must_change_password", False)
+        data["must_change_password"] = bool(prefs.get("must_change_password", False))
         return data
-
 
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField(required=True)
