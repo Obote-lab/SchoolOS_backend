@@ -61,6 +61,7 @@ DOMAIN_APPS = [
     "compliance",
     "dormitory",
     "branding",
+    "documentation",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + DOMAIN_APPS
@@ -305,3 +306,13 @@ MPESA_CALLBACK_URL = config(
 MPESA_TRANSACTION_TYPE = config(
     "MPESA_TRANSACTION_TYPE", default="CustomerPayBillOnline"
 )  # or CustomerBuyGoodsOnline
+
+
+
+
+
+DOCUMENTATION_MANAGER_USER_TYPES = [
+    "SYS",
+    "RAD",
+    "ADM",
+]

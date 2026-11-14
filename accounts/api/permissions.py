@@ -12,21 +12,26 @@ class HasPermission(permissions.BasePermission):
     """
     Centralized RBAC permission class.
 
-    Usage example:
-
-        class StudentViewSet(ModelViewSet):
-            permission_classes = [HasPermission]
-            module = "students"
-            required_action = "read"
-            required_scope = "school"
+    Scope hierarchy (higher scope can satisfy lower scope requests):
+        national > county > school > own
     """
 
     message = "You do not have permission to perform this action."
 
+    # Higher number = broader scope
+    SCOPE_RANK = {
+        "own": 1,
+        "school": 2,
+        "county": 3,
+        "national": 4,
+    }
+
+    # ------------------------------------------------------------------
     # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _is_system_user(user: CustomUser) -> bool:
-        """Superusers always bypass permission checks."""
         return user.is_superuser
 
     @staticmethod
@@ -47,13 +52,21 @@ class HasPermission(permissions.BasePermission):
         )
 
         if school:
+            # School-level request → allow school-specific roles + county/national
             roles = roles.filter(
                 Q(school=school)
-                | Q(role__access_level__in=[AccessLevelChoices.COUNTY, AccessLevelChoices.NATIONAL])
+                | Q(role__access_level__in=[
+                    AccessLevelChoices.COUNTY,
+                    AccessLevelChoices.NATIONAL,
+                ])
             )
         else:
+            # No school context → only county / national roles
             roles = roles.filter(
-                role__access_level__in=[AccessLevelChoices.COUNTY, AccessLevelChoices.NATIONAL]
+                role__access_level__in=[
+                    AccessLevelChoices.COUNTY,
+                    AccessLevelChoices.NATIONAL,
+                ]
             )
 
         return roles
@@ -71,7 +84,18 @@ class HasPermission(permissions.BasePermission):
             .order_by("-priority")
         )
 
+    def _scope_is_sufficient(self, permission_scope: str, required_scope: str) -> bool:
+        """
+        Return True if the permission's scope is equal to or broader
+        than what the view requires.
+        """
+        perm_rank = self.SCOPE_RANK.get(permission_scope, 0)
+        required_rank = self.SCOPE_RANK.get(required_scope, 2)  # default school
+        return perm_rank >= required_rank
+
+    # ------------------------------------------------------------------
     # Global Permission
+    # ------------------------------------------------------------------
 
     def has_permission(self, request, view) -> bool:
         user = request.user
@@ -85,9 +109,11 @@ class HasPermission(permissions.BasePermission):
         if self._is_system_user(user):
             return True
 
-        module, action, scope = self._get_view_requirements(view)
+        module, action, required_scope = self._get_view_requirements(view)
         if not module or not action:
-            logger.warning("%s is missing module or required_action", view.__class__.__name__)
+            logger.warning(
+                "%s is missing module or required_action", view.__class__.__name__
+            )
             return False
 
         school = getattr(request, "school", None)
@@ -100,14 +126,19 @@ class HasPermission(permissions.BasePermission):
         permissions_qs = self._get_permissions(role_ids, module, action)
 
         for permission in permissions_qs:
-            if permission.resource_scope != scope:
+            # KEY CHANGE: higher scope can satisfy lower scope
+            if not self._scope_is_sufficient(permission.resource_scope, required_scope):
                 continue
+
             if permission.check_permission(user, school=school):
                 return True
 
         return False
 
+    # ------------------------------------------------------------------
     # Object-level Permission
+    # ------------------------------------------------------------------
+
     def has_object_permission(self, request, view, obj) -> bool:
         user = request.user
 
@@ -117,7 +148,7 @@ class HasPermission(permissions.BasePermission):
         if self._is_system_user(user):
             return True
 
-        module, action, _ = self._get_view_requirements(view)
+        module, action, required_scope = self._get_view_requirements(view)
         if not module or not action:
             return False
 
@@ -136,79 +167,16 @@ class HasPermission(permissions.BasePermission):
         owner = getattr(obj, owner_field, None)
 
         for permission in permissions_qs:
+            # Special case for "own"
             if permission.resource_scope == "own":
                 if owner == user:
                     return True
+                continue
+
+            if not self._scope_is_sufficient(permission.resource_scope, required_scope):
                 continue
 
             if permission.check_permission(user, obj=obj, school=school):
                 return True
 
         return False
-
-
-class IsSystemUser(permissions.BasePermission):
-    """
-    Allows access only to superusers / system-level accounts.
-    """
-
-    message = "Only system users can perform this action."
-
-    def has_permission(self, request, view):
-        if not request.user.is_authenticated:
-            return False
-        return request.user.is_superuser
-
-
-class HasAnyRole(permissions.BasePermission):
-    """
-    Allows access if the user has at least one of the required role names.
-    Usage:
-        class SomeViewSet(...):
-            permission_classes = [IsAuthenticated, HasAnyRole]
-            required_roles = ["Principal", "Deputy Principal", "Registrar"]
-    """
-
-    message = "You do not have the required role."
-
-    def has_permission(self, request, view):
-        if not request.user.is_authenticated:
-            return False
-
-        required_roles = getattr(view, "required_roles", [])
-        if not required_roles:
-            return False
-
-        return UserRole.objects.filter(
-            user=request.user,
-            is_active=True,
-            role__name__in=required_roles,
-        ).exists()
-
-
-class HasRole(permissions.BasePermission):
-    """
-    Restricts access to users who currently hold a specific role name.
-    Usage:
-        class ComplianceViewSet(...):
-            permission_classes = [IsAuthenticated, HasRole]
-            required_role = "Compliance Officer"
-    """
-
-    message = "You do not have the required role."
-
-    def has_permission(self, request, view):
-        if not request.user.is_authenticated:
-            return False
-
-        if request.user.is_superuser:
-            return True
-
-        required_role = getattr(view, "required_role", None)
-        if not required_role:
-            return False
-
-        return request.user.user_roles.filter(
-            is_active=True,
-            role__name=required_role,
-        ).exists()

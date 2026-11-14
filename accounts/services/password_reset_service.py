@@ -43,8 +43,6 @@ class PasswordResetService:
                 model_name="CustomUser",
                 record_id=user.id,
                 reason="Password reset link requested",
-                school=user.school,
-                user_ip=request.META.get("REMOTE_ADDR") if request else None,
             )
 
             logger.info("Password reset email sent to %s", user.login_id)
@@ -96,7 +94,7 @@ class PasswordResetService:
             record_id=user.id,
             reason="Password successfully reset",
             school=user.school,
-            user_ip=request.META.get("REMOTE_ADDR") if request else None,
+            request=request,
         )
 
         # Send confirmation email
